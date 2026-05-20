@@ -1,10 +1,7 @@
 package net.coreprotect.command;
 
-import java.io.File;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.text.NumberFormat;
 import java.util.Arrays;
 import java.util.List;
@@ -182,16 +179,6 @@ public class PurgeCommand extends Consumer {
 
                     String query = "";
                     PreparedStatement preparedStmt = null;
-                    boolean abort = false;
-                    String purgePrefix = "tmp_" + ConfigHandler.prefix;
-
-                    if (!Config.getGlobal().MYSQL) {
-                        query = "ATTACH DATABASE '" + ConfigHandler.path + ConfigHandler.sqlite + ".tmp' AS tmp_db";
-                        preparedStmt = connection.prepareStatement(query);
-                        preparedStmt.execute();
-                        preparedStmt.close();
-                        purgePrefix = "tmp_db." + ConfigHandler.prefix;
-                    }
 
                     Integer[] lastVersion = Patch.getDatabaseVersion(connection, true);
                     boolean newVersion = VersionUtils.newVersion(lastVersion, VersionUtils.getInternalPluginVersion());
@@ -202,216 +189,46 @@ public class PurgeCommand extends Consumer {
                         return;
                     }
 
-                    if (!Config.getGlobal().MYSQL) {
-                        for (String table : ConfigHandler.databaseTables) {
-                            try {
-                                query = "DROP TABLE IF EXISTS " + purgePrefix + table + "";
-                                preparedStmt = connection.prepareStatement(query);
-                                preparedStmt.execute();
-                                preparedStmt.close();
-                            }
-                            catch (Exception e) {
-                                e.printStackTrace();
-                            }
-                        }
-
-                        Database.createDatabaseTables(purgePrefix, false, null, Config.getGlobal().MYSQL, true);
-                    }
-
                     List<String> worldTables = Arrays.asList("sign", "container", "item", "session", "chat", "command", "block");
                     List<String> restrictTables = Arrays.asList("block");
-                    List<String> excludeTables = Arrays.asList("database_lock"); // don't insert data into these tables
                     for (String table : ConfigHandler.databaseTables) {
                         String tableName = table.replaceAll("_", " ");
                         Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_PROCESSING, tableName));
 
-                        if (!Config.getGlobal().MYSQL) {
-                            String columns = "";
-                            ResultSet rs = connection.createStatement().executeQuery("SELECT * FROM " + purgePrefix + table);
-                            ResultSetMetaData resultSetMetaData = rs.getMetaData();
-                            int columnCount = resultSetMetaData.getColumnCount();
-                            for (int i = 1; i <= columnCount; i++) {
-                                String name = resultSetMetaData.getColumnName(i);
-                                if (columns.length() == 0) {
-                                    columns = name;
-                                }
-                                else {
-                                    columns = columns + "," + name;
-                                }
+                        try {
+                            boolean purge = PURGE_TABLES.contains(table);
+
+                            String blockRestriction = "";
+                            if (request.hasBlockRestriction && restrictTables.contains(table)) {
+                                blockRestriction = "type IN(" + request.includeBlock + ") AND ";
                             }
-                            rs.close();
-
-                            boolean error = false;
-                            if (!excludeTables.contains(table)) {
-                                try {
-                                    boolean purge = true;
-                                    String timeLimit = "";
-                                    if (PURGE_TABLES.contains(table)) {
-                                        String blockRestriction = "(";
-                                        if (request.hasBlockRestriction && restrictTables.contains(table)) {
-                                            blockRestriction = "type NOT IN(" + request.includeBlock + ") OR (type IN(" + request.includeBlock + ") AND ";
-                                        }
-                                        else if (request.hasBlockRestriction) {
-                                            purge = false;
-                                        }
-
-                                        if (request.worldId > 0 && worldTables.contains(table)) {
-                                            timeLimit = " WHERE (" + blockRestriction + "wid = '" + request.worldId + "' AND (time >= '" + timeEnd + "' OR time < '" + timeStart + "'))) OR (wid != '" + request.worldId + "')";
-                                        }
-                                        else if (request.worldId == 0 && purge) {
-                                            timeLimit = " WHERE " + blockRestriction + "(time >= '" + timeEnd + "' OR time < '" + timeStart + "'))";
-                                        }
-                                    }
-                                    query = "INSERT INTO " + purgePrefix + table + " SELECT " + columns + " FROM " + ConfigHandler.prefix + table + timeLimit;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    error = true;
-                                    e.printStackTrace();
-                                }
+                            else if (request.hasBlockRestriction) {
+                                purge = false;
                             }
 
-                            if (error) {
-                                Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_ERROR, tableName));
-                                Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_REPAIRING));
-
-                                try {
-                                    query = "DELETE FROM " + purgePrefix + table;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-
-                                try {
-                                    query = "REINDEX " + ConfigHandler.prefix + table;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-
-                                try {
-                                    String index = " NOT INDEXED";
-                                    query = "INSERT INTO " + purgePrefix + table + " SELECT " + columns + " FROM " + ConfigHandler.prefix + table + index;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                    abort = true;
-                                    break;
-                                }
-
-                                try {
-                                    boolean purge = PURGE_TABLES.contains(table);
-
-                                    String blockRestriction = "";
-                                    if (request.hasBlockRestriction && restrictTables.contains(table)) {
-                                        blockRestriction = "type IN(" + request.includeBlock + ") AND ";
-                                    }
-                                    else if (request.hasBlockRestriction) {
-                                        purge = false;
-                                    }
-
-                                    String worldRestriction = "";
-                                    if (request.worldId > 0 && worldTables.contains(table)) {
-                                        worldRestriction = " AND wid = '" + request.worldId + "'";
-                                    }
-                                    else if (request.worldId > 0) {
-                                        purge = false;
-                                    }
-
-                                    if (purge) {
-                                        query = "DELETE FROM " + purgePrefix + table + " WHERE " + blockRestriction + "time < '" + timeEnd + "' AND time >= '" + timeStart + "'" + worldRestriction;
-                                        preparedStmt = connection.prepareStatement(query);
-                                        preparedStmt.execute();
-                                        preparedStmt.close();
-                                    }
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
+                            String worldRestriction = "";
+                            if (request.worldId > 0 && worldTables.contains(table)) {
+                                worldRestriction = " AND wid = '" + request.worldId + "'";
+                            }
+                            else if (request.worldId > 0) {
+                                purge = false;
                             }
 
-                            if (PURGE_TABLES.contains(table)) {
-                                int oldCount = 0;
-                                try {
-                                    query = "SELECT COUNT(*) as count FROM " + ConfigHandler.prefix + table + " LIMIT 0, 1";
-                                    preparedStmt = connection.prepareStatement(query);
-                                    ResultSet resultSet = preparedStmt.executeQuery();
-                                    while (resultSet.next()) {
-                                        oldCount = resultSet.getInt("count");
-                                    }
-                                    resultSet.close();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-
-                                int new_count = 0;
-                                try {
-                                    query = "SELECT COUNT(*) as count FROM " + purgePrefix + table + " LIMIT 0, 1";
-                                    preparedStmt = connection.prepareStatement(query);
-                                    ResultSet resultSet = preparedStmt.executeQuery();
-                                    while (resultSet.next()) {
-                                        new_count = resultSet.getInt("count");
-                                    }
-                                    resultSet.close();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-
-                                removed = removed + (oldCount - new_count);
+                            if (purge) {
+                                query = "DELETE FROM " + ConfigHandler.prefix + table + " WHERE " + blockRestriction + "time < '" + timeEnd + "' AND time >= '" + timeStart + "'" + worldRestriction;
+                                preparedStmt = connection.prepareStatement(query);
+                                preparedStmt.execute();
+                                removed = removed + preparedStmt.getUpdateCount();
+                                preparedStmt.close();
                             }
                         }
-
-                        if (Config.getGlobal().MYSQL) {
-                            try {
-                                boolean purge = PURGE_TABLES.contains(table);
-
-                                String blockRestriction = "";
-                                if (request.hasBlockRestriction && restrictTables.contains(table)) {
-                                    blockRestriction = "type IN(" + request.includeBlock + ") AND ";
-                                }
-                                else if (request.hasBlockRestriction) {
-                                    purge = false;
-                                }
-
-                                String worldRestriction = "";
-                                if (request.worldId > 0 && worldTables.contains(table)) {
-                                    worldRestriction = " AND wid = '" + request.worldId + "'";
-                                }
-                                else if (request.worldId > 0) {
-                                    purge = false;
-                                }
-
-                                if (purge) {
-                                    query = "DELETE FROM " + ConfigHandler.prefix + table + " WHERE " + blockRestriction + "time < '" + timeEnd + "' AND time >= '" + timeStart + "'" + worldRestriction;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    removed = removed + preparedStmt.getUpdateCount();
-                                    preparedStmt.close();
-                                }
+                        catch (Exception e) {
+                            if (!ConfigHandler.serverRunning) {
+                                Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_FAILED));
+                                return;
                             }
-                            catch (Exception e) {
-                                if (!ConfigHandler.serverRunning) {
-                                    Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_FAILED));
-                                    return;
-                                }
 
-                                e.printStackTrace();
-                            }
+                            e.printStackTrace();
                         }
                     }
 
@@ -426,23 +243,6 @@ public class PurgeCommand extends Consumer {
                     }
 
                     connection.close();
-
-                    if (abort) {
-                        if (!Config.getGlobal().MYSQL) {
-                            (new File(ConfigHandler.path + ConfigHandler.sqlite + ".tmp")).delete();
-                        }
-                        ConfigHandler.loadDatabase();
-                        Chat.sendGlobalMessage(request.sender, Color.RED + Phrase.build(Phrase.PURGE_ABORTED));
-                        Consumer.isPaused = false;
-                        ConfigHandler.purgeRunning = false;
-                        return;
-                    }
-
-                    if (!Config.getGlobal().MYSQL) {
-                        (new File(ConfigHandler.path + ConfigHandler.sqlite)).delete();
-                        (new File(ConfigHandler.path + ConfigHandler.sqlite + ".tmp")).renameTo(new File(ConfigHandler.path + ConfigHandler.sqlite));
-                    }
-
                     ConfigHandler.loadDatabase();
                     if (request.autoPurge) {
                         ConfigHandler.autoPurgeRowsPurged.addAndGet(removed);

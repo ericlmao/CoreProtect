@@ -109,9 +109,9 @@ For example, `/co purge t:30d r:#world_nether` will delete all data older than o
 You can optionally specify block types in CoreProtect v23+.  
 For example, `/co purge t:30d i:stone,dirt` will delete all stone and dirt data older than one month, without removing other block data.
 
-**MySQL Optimization**  
+**MySQL Optimization**
 In CoreProtect v2.15+, adding "#optimize" to the end of the command (e.g. `/co purge t:30d #optimize`) will also optimize your tables and reclaim disk space.
-This option is only available when using MySQL, as SQLite purges do this by default.
+This option is only available when using MySQL. SQLite purges remove rows in place and do not duplicate or rebuild the database file.
 
 *Please note adding the #optimize option will significantly slow down your purge, and is generally unnecessary.*
 
