@@ -9,6 +9,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import net.coreprotect.CoreProtect;
 import net.coreprotect.command.CommandHandler;
+import net.coreprotect.command.PurgeCommand;
 import net.coreprotect.command.TabHandler;
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
@@ -74,6 +75,7 @@ public class PluginInitializationService {
 
             // Start background services
             startBackgroundServices(plugin);
+            PurgeCommand.runAutoPurge();
 
             // Start metrics
             enableMetrics(plugin);
