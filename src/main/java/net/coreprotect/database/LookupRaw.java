@@ -18,6 +18,7 @@ import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.consumer.Consumer;
 import net.coreprotect.consumer.Queue;
+import net.coreprotect.database.payload.PayloadResolver;
 import net.coreprotect.database.statement.UserStatement;
 import net.coreprotect.listener.channel.PluginChannelHandshakeListener;
 import net.coreprotect.model.action.LookupActions;
@@ -182,14 +183,14 @@ public class LookupRaw extends Queue {
                     if ((lookup && actionList.size() == 0) || actionList.contains(LookupActions.CONTAINER) || actionList.contains(5) || actionList.contains(LookupActions.ITEM)) {
                         resultData = results.getInt("data");
                         resultAmount = results.getInt("amount");
-                        resultMeta = results.getBytes("metadata");
+                        resultMeta = PayloadResolver.getBytes(statement.getConnection(), results, "metadata", "metadata_payload_id");
                         resultTable = results.getInt("tbl");
                         hasTbl = true;
                     }
                     else {
                         resultData = results.getInt("data");
-                        resultMeta = results.getBytes("meta");
-                        resultBlockData = results.getBytes("blockdata");
+                        resultMeta = PayloadResolver.getBytes(statement.getConnection(), results, "meta", "meta_payload_id");
+                        resultBlockData = PayloadResolver.getBytes(statement.getConnection(), results, "blockdata", "blockdata_payload_id");
                     }
 
                     boolean valid = true;
@@ -563,12 +564,18 @@ public class LookupRaw extends Queue {
                 unionLimit = " ORDER BY time DESC, id DESC LIMIT " + (limitOffset + limitCount) + "";
             }
 
-            String rows = "rowid as id,time,user,wid,x,y,z,action,type,data,meta,blockdata,rolled_back";
+            boolean sqlitePayloadColumns = !Config.getGlobal().MYSQL;
+            String blockPayloadColumns = sqlitePayloadColumns ? ",meta_payload_id,blockdata_payload_id" : "";
+            String metadataPayloadColumn = sqlitePayloadColumns ? ",metadata_payload_id" : "";
+            String itemPayloadColumn = sqlitePayloadColumns ? ",data_payload_id as metadata_payload_id" : "";
+            String blockMetaPayloadColumn = sqlitePayloadColumns ? ",meta_payload_id as metadata_payload_id" : "";
+
+            String rows = "rowid as id,time,user,wid,x,y,z,action,type,data,meta,blockdata,rolled_back" + blockPayloadColumns;
             String queryOrder = " ORDER BY rowid DESC";
 
             if (actionList.contains(LookupActions.CONTAINER) || actionList.contains(5)) {
                 queryTable = "container";
-                rows = "rowid as id,time,user,wid,x,y,z,action,type,data,rolled_back,amount,metadata";
+                rows = "rowid as id,time,user,wid,x,y,z,action,type,data,rolled_back,amount,metadata" + metadataPayloadColumn;
             }
             else if (actionList.contains(LookupActions.CHAT) || actionList.contains(LookupActions.COMMAND)) {
                 queryTable = "chat";
@@ -595,7 +602,7 @@ public class LookupRaw extends Queue {
             }
             else if (actionList.contains(LookupActions.ITEM)) {
                 queryTable = "item";
-                rows = "rowid as id,time,user,wid,x,y,z,type,data as metadata,0 as data,amount,action,0 as rolled_back";
+                rows = "rowid as id,time,user,wid,x,y,z,type,data as metadata,0 as data,amount,action,0 as rolled_back" + itemPayloadColumn;
             }
 
             if (count) {
@@ -644,7 +651,7 @@ public class LookupRaw extends Queue {
             boolean itemLookup = inventoryQuery;
             if ((lookup && actionList.size() == 0) || (itemLookup && !actionList.contains(LookupActions.BLOCK_BREAK))) {
                 if (!count) {
-                    rows = "rowid as id,time,user,wid,x,y,z,type,meta as metadata,data,-1 as amount,action,rolled_back";
+                    rows = "rowid as id,time,user,wid,x,y,z,type,meta as metadata,data,-1 as amount,action,rolled_back" + blockMetaPayloadColumn;
                 }
 
                 if (inventoryQuery) {
@@ -656,7 +663,7 @@ public class LookupRaw extends Queue {
                     }
 
                     if (!count) {
-                        rows = "rowid as id,time,user,wid,x,y,z,type,meta as metadata,data,1 as amount,action,rolled_back";
+                        rows = "rowid as id,time,user,wid,x,y,z,type,meta as metadata,data,1 as amount,action,rolled_back" + blockMetaPayloadColumn;
                     }
                 }
 
@@ -670,12 +677,12 @@ public class LookupRaw extends Queue {
 
             if (itemLookup) {
                 if (!count) {
-                    rows = "rowid as id,time,user,wid,x,y,z,type,metadata,data,amount,action,rolled_back";
+                    rows = "rowid as id,time,user,wid,x,y,z,type,metadata,data,amount,action,rolled_back" + metadataPayloadColumn;
                 }
                 query = query + unionSelect + "SELECT " + "'1' as tbl," + rows + " FROM " + ConfigHandler.prefix + "container WHERE" + queryBlock + unionLimit + ") UNION ALL ";
 
                 if (!count) {
-                    rows = "rowid as id,time,user,wid,x,y,z,type,data as metadata,0 as data,amount,action,rolled_back";
+                    rows = "rowid as id,time,user,wid,x,y,z,type,data as metadata,0 as data,amount,action,rolled_back" + itemPayloadColumn;
                     queryOrder = " ORDER BY time DESC, tbl DESC, id DESC";
                 }
 

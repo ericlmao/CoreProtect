@@ -15,6 +15,7 @@ import net.coreprotect.api.result.ContainerResult;
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.database.Database;
+import net.coreprotect.database.payload.PayloadResolver;
 import net.coreprotect.database.statement.UserStatement;
 import net.coreprotect.utility.BlockUtils;
 import net.coreprotect.utility.StringUtils;
@@ -70,7 +71,7 @@ public class BlockAPI {
             }
 
             try (Statement statement = connection.createStatement()) {
-                String query = "SELECT time,user,action,type,data,blockdata,rolled_back FROM " + ConfigHandler.prefix + "block " + WorldUtils.getWidIndex("block") + "WHERE wid = '" + worldId + "' AND x = '" + x + "' AND z = '" + z + "' AND y = '" + y + "' AND time > '" + checkTime + "' ORDER BY rowid DESC";
+                String query = "SELECT time,user,action,type,data,blockdata,rolled_back" + sqliteColumn(",blockdata_payload_id") + " FROM " + ConfigHandler.prefix + "block " + WorldUtils.getWidIndex("block") + "WHERE wid = '" + worldId + "' AND x = '" + x + "' AND z = '" + z + "' AND y = '" + y + "' AND time > '" + checkTime + "' ORDER BY rowid DESC";
 
                 try (ResultSet results = statement.executeQuery(query)) {
                     while (results.next()) {
@@ -79,7 +80,7 @@ public class BlockAPI {
                         String resultAction = results.getString("action");
                         int resultType = results.getInt("type");
                         String resultData = results.getString("data");
-                        byte[] resultBlockData = results.getBytes("blockdata");
+                        byte[] resultBlockData = PayloadResolver.getBytes(connection, results, "blockdata", "blockdata_payload_id");
                         String resultRolledBack = results.getString("rolled_back");
 
                         if (ConfigHandler.playerIdCacheReversed.get(resultUserId) == null) {
@@ -148,7 +149,9 @@ public class BlockAPI {
             String worldName = block.getWorld().getName();
             int worldId = WorldUtils.getWorldId(worldName);
 
-            StringBuilder query = new StringBuilder("SELECT time,user,action,type,data,blockdata,rolled_back,wid,x,y,z FROM ");
+            StringBuilder query = new StringBuilder("SELECT time,user,action,type,data,blockdata,rolled_back,wid,x,y,z");
+            query.append(sqliteColumn(",blockdata_payload_id"));
+            query.append(" FROM ");
             query.append(ConfigHandler.prefix).append("block ").append(WorldUtils.getWidIndex("block"));
             query.append("WHERE wid = ? AND x = ? AND z = ? AND y = ? AND time > ?");
             if (userId != null) {
@@ -224,7 +227,9 @@ public class BlockAPI {
                 return result;
             }
 
-            StringBuilder query = new StringBuilder("SELECT time,user,wid,x,y,z,action,type,data,amount,metadata,rolled_back FROM ");
+            StringBuilder query = new StringBuilder("SELECT time,user,wid,x,y,z,action,type,data,amount,metadata,rolled_back");
+            query.append(sqliteColumn(",metadata_payload_id"));
+            query.append(" FROM ");
             query.append(ConfigHandler.prefix).append("container ");
             if (filter.hasLocation()) {
                 query.append(WorldUtils.getWidIndex("container"));
@@ -259,7 +264,7 @@ public class BlockAPI {
 
         return new ContainerResult(
                 results.getLong("time"), resultUser, WorldUtils.getWorldName(results.getInt("wid")), results.getInt("x"), results.getInt("y"), results.getInt("z"),
-                results.getInt("type"), results.getInt("data"), results.getInt("amount"), results.getBytes("metadata"),
+                results.getInt("type"), results.getInt("data"), results.getInt("amount"), PayloadResolver.getBytes(connection, results, "metadata", "metadata_payload_id"),
                 results.getInt("action"), results.getInt("rolled_back")
         );
     }
@@ -272,12 +277,16 @@ public class BlockAPI {
         }
 
         int resultType = results.getInt("type");
-        String blockData = BlockUtils.byteDataToString(results.getBytes("blockdata"), resultType);
+        String blockData = BlockUtils.byteDataToString(PayloadResolver.getBytes(connection, results, "blockdata", "blockdata_payload_id"), resultType);
 
         return new BlockResult(
                 results.getLong("time"), resultUser, worldName, results.getInt("x"), results.getInt("y"), results.getInt("z"),
                 resultType, results.getInt("data"), blockData, results.getInt("action"), results.getInt("rolled_back")
         );
+    }
+
+    private static String sqliteColumn(String columnSql) {
+        return Config.getGlobal().MYSQL ? "" : columnSql;
     }
 
 }

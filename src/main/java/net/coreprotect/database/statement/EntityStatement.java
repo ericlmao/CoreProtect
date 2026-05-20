@@ -5,6 +5,7 @@ import java.io.ByteArrayOutputStream;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,8 +17,11 @@ import org.bukkit.util.io.BukkitObjectInputStream;
 import org.bukkit.util.io.BukkitObjectOutputStream;
 
 import net.coreprotect.bukkit.BukkitAdapter;
+import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.database.Database;
+import net.coreprotect.database.payload.PayloadResolver;
+import net.coreprotect.database.payload.PayloadStorage;
 
 public class EntityStatement {
 
@@ -35,8 +39,23 @@ public class EntityStatement {
             bos.close();
 
             byte[] byte_data = bos.toByteArray();
+            long payloadId = 0L;
+            if (PayloadStorage.shouldWritePayloads()) {
+                payloadId = PayloadStorage.store(preparedStmt.getConnection(), byte_data);
+                if (!Config.getGlobal().SQLITE_PAYLOAD_KEEP_LEGACY_INLINE_VALUES) {
+                    byte_data = null;
+                }
+            }
             preparedStmt.setInt(1, time);
             preparedStmt.setObject(2, byte_data);
+            if (!Config.getGlobal().MYSQL) {
+                if (payloadId > 0) {
+                    preparedStmt.setLong(3, payloadId);
+                }
+                else {
+                    preparedStmt.setNull(3, Types.INTEGER);
+                }
+            }
             if (Database.hasReturningKeys()) {
                 return preparedStmt.executeQuery();
             }
@@ -92,7 +111,7 @@ public class EntityStatement {
         try {
             ResultSet resultSet = statement.executeQuery(query);
             while (resultSet.next()) {
-                byte[] data = resultSet.getBytes("data");
+                byte[] data = PayloadResolver.getBytes(statement.getConnection(), resultSet, "data", "data_payload_id");
                 ByteArrayInputStream bais = new ByteArrayInputStream(data);
                 BukkitObjectInputStream ins = new BukkitObjectInputStream(bais);
                 @SuppressWarnings("unchecked")

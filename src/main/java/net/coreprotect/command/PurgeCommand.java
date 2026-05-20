@@ -241,6 +241,12 @@ public class PurgeCommand extends Consumer {
                             preparedStmt.close();
                         }
                     }
+                    else if (!Config.getGlobal().MYSQL) {
+                        query = "DELETE FROM co_payload WHERE NOT EXISTS (SELECT 1 FROM " + ConfigHandler.prefix + "block WHERE meta_payload_id = co_payload.id OR blockdata_payload_id = co_payload.id) AND NOT EXISTS (SELECT 1 FROM " + ConfigHandler.prefix + "container WHERE metadata_payload_id = co_payload.id) AND NOT EXISTS (SELECT 1 FROM " + ConfigHandler.prefix + "item WHERE data_payload_id = co_payload.id) AND NOT EXISTS (SELECT 1 FROM " + ConfigHandler.prefix + "entity WHERE data_payload_id = co_payload.id)";
+                        preparedStmt = connection.prepareStatement(query);
+                        preparedStmt.execute();
+                        preparedStmt.close();
+                    }
 
                     connection.close();
                     ConfigHandler.loadDatabase();

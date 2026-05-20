@@ -10,6 +10,7 @@ import net.coreprotect.api.result.InventoryResult;
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.database.Database;
+import net.coreprotect.database.payload.PayloadResolver;
 import net.coreprotect.database.statement.UserStatement;
 import net.coreprotect.utility.WorldUtils;
 
@@ -73,13 +74,16 @@ public class InventoryAPI {
 
     private static String buildQuery(String where, boolean hasLimit) {
         StringBuilder query = new StringBuilder("SELECT * FROM (");
-        query.append("SELECT 0 AS source,rowid AS id,time,user,wid,x,y,z,type,data,1 AS amount,meta AS metadata,action,rolled_back FROM ")
+        String blockPayloadColumn = Config.getGlobal().MYSQL ? "" : ",meta_payload_id AS metadata_payload_id";
+        String containerPayloadColumn = Config.getGlobal().MYSQL ? "" : ",metadata_payload_id";
+        String itemPayloadColumn = Config.getGlobal().MYSQL ? "" : ",data_payload_id AS metadata_payload_id";
+        query.append("SELECT 0 AS source,rowid AS id,time,user,wid,x,y,z,type,data,1 AS amount,meta AS metadata,action,rolled_back").append(blockPayloadColumn).append(" FROM ")
                 .append(ConfigHandler.prefix).append("block ").append(where).append(" AND action = 1");
         query.append(" UNION ALL ");
-        query.append("SELECT 1 AS source,rowid AS id,time,user,wid,x,y,z,type,data,amount,metadata,action,rolled_back FROM ")
+        query.append("SELECT 1 AS source,rowid AS id,time,user,wid,x,y,z,type,data,amount,metadata,action,rolled_back").append(containerPayloadColumn).append(" FROM ")
                 .append(ConfigHandler.prefix).append("container ").append(where);
         query.append(" UNION ALL ");
-        query.append("SELECT 2 AS source,rowid AS id,time,user,wid,x,y,z,type,0 AS data,amount,data AS metadata,action,rolled_back FROM ")
+        query.append("SELECT 2 AS source,rowid AS id,time,user,wid,x,y,z,type,0 AS data,amount,data AS metadata,action,rolled_back").append(itemPayloadColumn).append(" FROM ")
                 .append(ConfigHandler.prefix).append("item ").append(where);
         query.append(") AS inventory_lookup ORDER BY time DESC, source DESC, id DESC");
         if (hasLimit) {
@@ -99,7 +103,7 @@ public class InventoryAPI {
         return new InventoryResult(
                 results.getLong("time"), username, WorldUtils.getWorldName(results.getInt("wid")),
                 results.getInt("x"), results.getInt("y"), results.getInt("z"),
-                results.getInt("type"), results.getInt("data"), results.getInt("amount"), results.getBytes("metadata"),
+                results.getInt("type"), results.getInt("data"), results.getInt("amount"), PayloadResolver.getBytes(connection, results, "metadata", "metadata_payload_id"),
                 results.getInt("action"), results.getInt("rolled_back"), results.getInt("source")
         );
     }
