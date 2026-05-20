@@ -41,6 +41,7 @@ public class Config extends Language {
     public String MYSQL_PASSWORD;
     public String LANGUAGE;
     public String AUTO_PURGE;
+    public String AUTO_PURGE_TIME;
     public boolean ENABLE_SSL;
     public boolean DISABLE_WAL;
     public boolean HOVER_EVENTS;
@@ -241,6 +242,7 @@ public class Config extends Language {
         this.SQLITE_PAYLOAD_COMPRESSION_CODEC = this.getString("database.sqlite.payload-compression.codec");
         this.LANGUAGE = this.getString("language");
         this.AUTO_PURGE = this.getString("auto-purge");
+        this.AUTO_PURGE_TIME = this.getString("auto-purge-time");
         this.CHECK_UPDATES = this.getBoolean("check-updates");
         this.API_ENABLED = this.getBoolean("api-enabled");
         this.VERBOSE = this.getBoolean("verbose");
