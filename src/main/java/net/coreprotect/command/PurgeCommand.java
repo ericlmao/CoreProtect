@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.command.CommandSender;
@@ -35,6 +36,34 @@ import net.coreprotect.utility.VersionUtils;
 public class PurgeCommand extends Consumer {
 
     public static final List<String> PURGE_TABLES = Arrays.asList("sign", "container", "item", "skull", "session", "chat", "command", "entity", "block");
+
+    private static class PurgeRequest {
+        private final CommandSender sender;
+        private final String[] args;
+        private final long startTime;
+        private final long endTime;
+        private final int worldId;
+        private final String restrictTargets;
+        private final String includeBlock;
+        private final boolean optimize;
+        private final boolean hasBlockRestriction;
+        private final int restrictCount;
+        private final boolean autoPurge;
+
+        private PurgeRequest(CommandSender sender, String[] args, long startTime, long endTime, int worldId, String restrictTargets, String includeBlock, boolean optimize, boolean hasBlockRestriction, int restrictCount, boolean autoPurge) {
+            this.sender = sender;
+            this.args = args;
+            this.startTime = startTime;
+            this.endTime = endTime;
+            this.worldId = worldId;
+            this.restrictTargets = restrictTargets;
+            this.includeBlock = includeBlock;
+            this.optimize = optimize;
+            this.hasBlockRestriction = hasBlockRestriction;
+            this.restrictCount = restrictCount;
+            this.autoPurge = autoPurge;
+        }
+    }
 
     private static String findUnsupportedPurgeArgument(String[] args) {
         boolean includeContinuation = false;
@@ -77,6 +106,364 @@ public class PurgeCommand extends Consumer {
         }
 
         return null;
+    }
+
+    public static void runAutoPurge() {
+        String autoPurge = Config.getGlobal().AUTO_PURGE;
+        if (autoPurge == null) {
+            return;
+        }
+
+        autoPurge = autoPurge.trim();
+        if (autoPurge.length() == 0 || autoPurge.equalsIgnoreCase("false")) {
+            return;
+        }
+        if (ConfigHandler.converterRunning || ConfigHandler.migrationRunning || ConfigHandler.purgeRunning) {
+            return;
+        }
+
+        String[] args = new String[] { "purge", "t:" + autoPurge };
+        long[] argTime = CommandParser.parseTime(args);
+        long startTime = argTime[1] > 0 ? argTime[0] : 0;
+        long endTime = argTime[1] > 0 ? argTime[1] : argTime[0];
+        if (endTime <= 0) {
+            return;
+        }
+
+        PurgeRequest request = new PurgeRequest(Bukkit.getConsoleSender(), args, startTime, endTime, 0, "", "", false, false, 0, true);
+        startPurgeThread(request);
+    }
+
+    private static void startPurgeThread(final PurgeRequest request) {
+        class BasicThread implements Runnable {
+
+            @Override
+            public void run() {
+                try {
+                    long timestamp = (System.currentTimeMillis() / 1000L);
+                    long timeStart = request.startTime > 0 ? (timestamp - request.startTime) : 0;
+                    long timeEnd = timestamp - request.endTime;
+                    long removed = 0;
+
+                    Connection connection = null;
+                    for (int i = 0; i <= 5; i++) {
+                        connection = Database.getConnection(false, 500);
+                        if (connection != null) {
+                            break;
+                        }
+                        Thread.sleep(1000);
+                    }
+
+                    if (connection == null) {
+                        Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.DATABASE_BUSY));
+                        return;
+                    }
+
+                    if (request.worldId > 0) {
+                        String worldName = CommandParser.parseWorldName(request.args, false);
+                        Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_STARTED, worldName));
+                    }
+                    else {
+                        Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_STARTED, "#global"));
+                    }
+
+                    if (request.hasBlockRestriction) {
+                        Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.ROLLBACK_INCLUDE, request.restrictTargets, Selector.FIRST, Selector.FIRST, (request.restrictCount == 1 ? Selector.FIRST : Selector.SECOND))); // include
+                    }
+
+                    Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_NOTICE_1));
+                    Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_NOTICE_2));
+
+                    ConfigHandler.purgeRunning = true;
+                    while (!Consumer.pausedSuccess) {
+                        Thread.sleep(1);
+                    }
+                    Consumer.isPaused = true;
+
+                    String query = "";
+                    PreparedStatement preparedStmt = null;
+                    boolean abort = false;
+                    String purgePrefix = "tmp_" + ConfigHandler.prefix;
+
+                    if (!Config.getGlobal().MYSQL) {
+                        query = "ATTACH DATABASE '" + ConfigHandler.path + ConfigHandler.sqlite + ".tmp' AS tmp_db";
+                        preparedStmt = connection.prepareStatement(query);
+                        preparedStmt.execute();
+                        preparedStmt.close();
+                        purgePrefix = "tmp_db." + ConfigHandler.prefix;
+                    }
+
+                    Integer[] lastVersion = Patch.getDatabaseVersion(connection, true);
+                    boolean newVersion = VersionUtils.newVersion(lastVersion, VersionUtils.getInternalPluginVersion());
+                    if (newVersion && !ConfigHandler.EDITION_BRANCH.contains("-dev")) {
+                        Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_FAILED));
+                        Consumer.isPaused = false;
+                        ConfigHandler.purgeRunning = false;
+                        return;
+                    }
+
+                    if (!Config.getGlobal().MYSQL) {
+                        for (String table : ConfigHandler.databaseTables) {
+                            try {
+                                query = "DROP TABLE IF EXISTS " + purgePrefix + table + "";
+                                preparedStmt = connection.prepareStatement(query);
+                                preparedStmt.execute();
+                                preparedStmt.close();
+                            }
+                            catch (Exception e) {
+                                e.printStackTrace();
+                            }
+                        }
+
+                        Database.createDatabaseTables(purgePrefix, false, null, Config.getGlobal().MYSQL, true);
+                    }
+
+                    List<String> worldTables = Arrays.asList("sign", "container", "item", "session", "chat", "command", "block");
+                    List<String> restrictTables = Arrays.asList("block");
+                    List<String> excludeTables = Arrays.asList("database_lock"); // don't insert data into these tables
+                    for (String table : ConfigHandler.databaseTables) {
+                        String tableName = table.replaceAll("_", " ");
+                        Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_PROCESSING, tableName));
+
+                        if (!Config.getGlobal().MYSQL) {
+                            String columns = "";
+                            ResultSet rs = connection.createStatement().executeQuery("SELECT * FROM " + purgePrefix + table);
+                            ResultSetMetaData resultSetMetaData = rs.getMetaData();
+                            int columnCount = resultSetMetaData.getColumnCount();
+                            for (int i = 1; i <= columnCount; i++) {
+                                String name = resultSetMetaData.getColumnName(i);
+                                if (columns.length() == 0) {
+                                    columns = name;
+                                }
+                                else {
+                                    columns = columns + "," + name;
+                                }
+                            }
+                            rs.close();
+
+                            boolean error = false;
+                            if (!excludeTables.contains(table)) {
+                                try {
+                                    boolean purge = true;
+                                    String timeLimit = "";
+                                    if (PURGE_TABLES.contains(table)) {
+                                        String blockRestriction = "(";
+                                        if (request.hasBlockRestriction && restrictTables.contains(table)) {
+                                            blockRestriction = "type NOT IN(" + request.includeBlock + ") OR (type IN(" + request.includeBlock + ") AND ";
+                                        }
+                                        else if (request.hasBlockRestriction) {
+                                            purge = false;
+                                        }
+
+                                        if (request.worldId > 0 && worldTables.contains(table)) {
+                                            timeLimit = " WHERE (" + blockRestriction + "wid = '" + request.worldId + "' AND (time >= '" + timeEnd + "' OR time < '" + timeStart + "'))) OR (wid != '" + request.worldId + "')";
+                                        }
+                                        else if (request.worldId == 0 && purge) {
+                                            timeLimit = " WHERE " + blockRestriction + "(time >= '" + timeEnd + "' OR time < '" + timeStart + "'))";
+                                        }
+                                    }
+                                    query = "INSERT INTO " + purgePrefix + table + " SELECT " + columns + " FROM " + ConfigHandler.prefix + table + timeLimit;
+                                    preparedStmt = connection.prepareStatement(query);
+                                    preparedStmt.execute();
+                                    preparedStmt.close();
+                                }
+                                catch (Exception e) {
+                                    error = true;
+                                    e.printStackTrace();
+                                }
+                            }
+
+                            if (error) {
+                                Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_ERROR, tableName));
+                                Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_REPAIRING));
+
+                                try {
+                                    query = "DELETE FROM " + purgePrefix + table;
+                                    preparedStmt = connection.prepareStatement(query);
+                                    preparedStmt.execute();
+                                    preparedStmt.close();
+                                }
+                                catch (Exception e) {
+                                    e.printStackTrace();
+                                }
+
+                                try {
+                                    query = "REINDEX " + ConfigHandler.prefix + table;
+                                    preparedStmt = connection.prepareStatement(query);
+                                    preparedStmt.execute();
+                                    preparedStmt.close();
+                                }
+                                catch (Exception e) {
+                                    e.printStackTrace();
+                                }
+
+                                try {
+                                    String index = " NOT INDEXED";
+                                    query = "INSERT INTO " + purgePrefix + table + " SELECT " + columns + " FROM " + ConfigHandler.prefix + table + index;
+                                    preparedStmt = connection.prepareStatement(query);
+                                    preparedStmt.execute();
+                                    preparedStmt.close();
+                                }
+                                catch (Exception e) {
+                                    e.printStackTrace();
+                                    abort = true;
+                                    break;
+                                }
+
+                                try {
+                                    boolean purge = PURGE_TABLES.contains(table);
+
+                                    String blockRestriction = "";
+                                    if (request.hasBlockRestriction && restrictTables.contains(table)) {
+                                        blockRestriction = "type IN(" + request.includeBlock + ") AND ";
+                                    }
+                                    else if (request.hasBlockRestriction) {
+                                        purge = false;
+                                    }
+
+                                    String worldRestriction = "";
+                                    if (request.worldId > 0 && worldTables.contains(table)) {
+                                        worldRestriction = " AND wid = '" + request.worldId + "'";
+                                    }
+                                    else if (request.worldId > 0) {
+                                        purge = false;
+                                    }
+
+                                    if (purge) {
+                                        query = "DELETE FROM " + purgePrefix + table + " WHERE " + blockRestriction + "time < '" + timeEnd + "' AND time >= '" + timeStart + "'" + worldRestriction;
+                                        preparedStmt = connection.prepareStatement(query);
+                                        preparedStmt.execute();
+                                        preparedStmt.close();
+                                    }
+                                }
+                                catch (Exception e) {
+                                    e.printStackTrace();
+                                }
+                            }
+
+                            if (PURGE_TABLES.contains(table)) {
+                                int oldCount = 0;
+                                try {
+                                    query = "SELECT COUNT(*) as count FROM " + ConfigHandler.prefix + table + " LIMIT 0, 1";
+                                    preparedStmt = connection.prepareStatement(query);
+                                    ResultSet resultSet = preparedStmt.executeQuery();
+                                    while (resultSet.next()) {
+                                        oldCount = resultSet.getInt("count");
+                                    }
+                                    resultSet.close();
+                                    preparedStmt.close();
+                                }
+                                catch (Exception e) {
+                                    e.printStackTrace();
+                                }
+
+                                int new_count = 0;
+                                try {
+                                    query = "SELECT COUNT(*) as count FROM " + purgePrefix + table + " LIMIT 0, 1";
+                                    preparedStmt = connection.prepareStatement(query);
+                                    ResultSet resultSet = preparedStmt.executeQuery();
+                                    while (resultSet.next()) {
+                                        new_count = resultSet.getInt("count");
+                                    }
+                                    resultSet.close();
+                                    preparedStmt.close();
+                                }
+                                catch (Exception e) {
+                                    e.printStackTrace();
+                                }
+
+                                removed = removed + (oldCount - new_count);
+                            }
+                        }
+
+                        if (Config.getGlobal().MYSQL) {
+                            try {
+                                boolean purge = PURGE_TABLES.contains(table);
+
+                                String blockRestriction = "";
+                                if (request.hasBlockRestriction && restrictTables.contains(table)) {
+                                    blockRestriction = "type IN(" + request.includeBlock + ") AND ";
+                                }
+                                else if (request.hasBlockRestriction) {
+                                    purge = false;
+                                }
+
+                                String worldRestriction = "";
+                                if (request.worldId > 0 && worldTables.contains(table)) {
+                                    worldRestriction = " AND wid = '" + request.worldId + "'";
+                                }
+                                else if (request.worldId > 0) {
+                                    purge = false;
+                                }
+
+                                if (purge) {
+                                    query = "DELETE FROM " + ConfigHandler.prefix + table + " WHERE " + blockRestriction + "time < '" + timeEnd + "' AND time >= '" + timeStart + "'" + worldRestriction;
+                                    preparedStmt = connection.prepareStatement(query);
+                                    preparedStmt.execute();
+                                    removed = removed + preparedStmt.getUpdateCount();
+                                    preparedStmt.close();
+                                }
+                            }
+                            catch (Exception e) {
+                                if (!ConfigHandler.serverRunning) {
+                                    Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_FAILED));
+                                    return;
+                                }
+
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+
+                    if (Config.getGlobal().MYSQL && request.optimize) {
+                        Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_OPTIMIZING));
+                        for (String table : ConfigHandler.databaseTables) {
+                            query = "OPTIMIZE LOCAL TABLE " + ConfigHandler.prefix + table + "";
+                            preparedStmt = connection.prepareStatement(query);
+                            preparedStmt.execute();
+                            preparedStmt.close();
+                        }
+                    }
+
+                    connection.close();
+
+                    if (abort) {
+                        if (!Config.getGlobal().MYSQL) {
+                            (new File(ConfigHandler.path + ConfigHandler.sqlite + ".tmp")).delete();
+                        }
+                        ConfigHandler.loadDatabase();
+                        Chat.sendGlobalMessage(request.sender, Color.RED + Phrase.build(Phrase.PURGE_ABORTED));
+                        Consumer.isPaused = false;
+                        ConfigHandler.purgeRunning = false;
+                        return;
+                    }
+
+                    if (!Config.getGlobal().MYSQL) {
+                        (new File(ConfigHandler.path + ConfigHandler.sqlite)).delete();
+                        (new File(ConfigHandler.path + ConfigHandler.sqlite + ".tmp")).renameTo(new File(ConfigHandler.path + ConfigHandler.sqlite));
+                    }
+
+                    ConfigHandler.loadDatabase();
+                    if (request.autoPurge) {
+                        ConfigHandler.autoPurgeRowsPurged.addAndGet(removed);
+                    }
+
+                    Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_SUCCESS));
+                    Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_ROWS, NumberFormat.getInstance().format(removed), (removed == 1 ? Selector.FIRST : Selector.SECOND)));
+                }
+                catch (Exception e) {
+                    Chat.sendGlobalMessage(request.sender, Phrase.build(Phrase.PURGE_FAILED));
+                    e.printStackTrace();
+                }
+
+                Consumer.isPaused = false;
+                ConfigHandler.purgeRunning = false;
+            }
+        }
+
+        Runnable runnable = new BasicThread();
+        Thread thread = new Thread(runnable);
+        thread.start();
     }
 
     protected static void runCommand(final CommandSender player, boolean permission, String[] args) {
@@ -234,337 +621,7 @@ public class PurgeCommand extends Consumer {
             }
         }
 
-        final StringBuilder restrictTargets = restrict;
-        final String includeBlockFinal = includeBlock;
-        final boolean optimize = optimizeCheck;
-        final boolean hasBlockRestriction = hasBlock;
-        final int restrictCountFinal = restrictCount;
-
-        class BasicThread implements Runnable {
-
-            @Override
-            public void run() {
-                try {
-                    long timestamp = (System.currentTimeMillis() / 1000L);
-                    long timeStart = startTime > 0 ? (timestamp - startTime) : 0;
-                    long timeEnd = timestamp - endTime;
-                    long removed = 0;
-
-                    Connection connection = null;
-                    for (int i = 0; i <= 5; i++) {
-                        connection = Database.getConnection(false, 500);
-                        if (connection != null) {
-                            break;
-                        }
-                        Thread.sleep(1000);
-                    }
-
-                    if (connection == null) {
-                        Chat.sendGlobalMessage(player, Phrase.build(Phrase.DATABASE_BUSY));
-                        return;
-                    }
-
-                    if (argWid > 0) {
-                        String worldName = CommandParser.parseWorldName(args, false);
-                        Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_STARTED, worldName));
-                    }
-                    else {
-                        Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_STARTED, "#global"));
-                    }
-
-                    if (hasBlockRestriction) {
-                        Chat.sendGlobalMessage(player, Phrase.build(Phrase.ROLLBACK_INCLUDE, restrictTargets.toString(), Selector.FIRST, Selector.FIRST, (restrictCountFinal == 1 ? Selector.FIRST : Selector.SECOND))); // include
-                    }
-
-                    Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_NOTICE_1));
-                    Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_NOTICE_2));
-
-                    ConfigHandler.purgeRunning = true;
-                    while (!Consumer.pausedSuccess) {
-                        Thread.sleep(1);
-                    }
-                    Consumer.isPaused = true;
-
-                    String query = "";
-                    PreparedStatement preparedStmt = null;
-                    boolean abort = false;
-                    String purgePrefix = "tmp_" + ConfigHandler.prefix;
-
-                    if (!Config.getGlobal().MYSQL) {
-                        query = "ATTACH DATABASE '" + ConfigHandler.path + ConfigHandler.sqlite + ".tmp' AS tmp_db";
-                        preparedStmt = connection.prepareStatement(query);
-                        preparedStmt.execute();
-                        preparedStmt.close();
-                        purgePrefix = "tmp_db." + ConfigHandler.prefix;
-                    }
-
-                    Integer[] lastVersion = Patch.getDatabaseVersion(connection, true);
-                    boolean newVersion = VersionUtils.newVersion(lastVersion, VersionUtils.getInternalPluginVersion());
-                    if (newVersion && !ConfigHandler.EDITION_BRANCH.contains("-dev")) {
-                        Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_FAILED));
-                        Consumer.isPaused = false;
-                        ConfigHandler.purgeRunning = false;
-                        return;
-                    }
-
-                    if (!Config.getGlobal().MYSQL) {
-                        for (String table : ConfigHandler.databaseTables) {
-                            try {
-                                query = "DROP TABLE IF EXISTS " + purgePrefix + table + "";
-                                preparedStmt = connection.prepareStatement(query);
-                                preparedStmt.execute();
-                                preparedStmt.close();
-                            }
-                            catch (Exception e) {
-                                e.printStackTrace();
-                            }
-                        }
-
-                        Database.createDatabaseTables(purgePrefix, false, null, Config.getGlobal().MYSQL, true);
-                    }
-
-                    List<String> worldTables = Arrays.asList("sign", "container", "item", "session", "chat", "command", "block");
-                    List<String> restrictTables = Arrays.asList("block");
-                    List<String> excludeTables = Arrays.asList("database_lock"); // don't insert data into these tables
-                    for (String table : ConfigHandler.databaseTables) {
-                        String tableName = table.replaceAll("_", " ");
-                        Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_PROCESSING, tableName));
-
-                        if (!Config.getGlobal().MYSQL) {
-                            String columns = "";
-                            ResultSet rs = connection.createStatement().executeQuery("SELECT * FROM " + purgePrefix + table);
-                            ResultSetMetaData resultSetMetaData = rs.getMetaData();
-                            int columnCount = resultSetMetaData.getColumnCount();
-                            for (int i = 1; i <= columnCount; i++) {
-                                String name = resultSetMetaData.getColumnName(i);
-                                if (columns.length() == 0) {
-                                    columns = name;
-                                }
-                                else {
-                                    columns = columns + "," + name;
-                                }
-                            }
-                            rs.close();
-
-                            boolean error = false;
-                            if (!excludeTables.contains(table)) {
-                                try {
-                                    boolean purge = true;
-                                    String timeLimit = "";
-                                    if (PURGE_TABLES.contains(table)) {
-                                        String blockRestriction = "(";
-                                        if (hasBlockRestriction && restrictTables.contains(table)) {
-                                            blockRestriction = "type NOT IN(" + includeBlockFinal + ") OR (type IN(" + includeBlockFinal + ") AND ";
-                                        }
-                                        else if (hasBlockRestriction) {
-                                            purge = false;
-                                        }
-
-                                        if (argWid > 0 && worldTables.contains(table)) {
-                                            timeLimit = " WHERE (" + blockRestriction + "wid = '" + argWid + "' AND (time >= '" + timeEnd + "' OR time < '" + timeStart + "'))) OR (wid != '" + argWid + "')";
-                                        }
-                                        else if (argWid == 0 && purge) {
-                                            timeLimit = " WHERE " + blockRestriction + "(time >= '" + timeEnd + "' OR time < '" + timeStart + "'))";
-                                        }
-                                    }
-                                    query = "INSERT INTO " + purgePrefix + table + " SELECT " + columns + " FROM " + ConfigHandler.prefix + table + timeLimit;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    error = true;
-                                    e.printStackTrace();
-                                }
-                            }
-
-                            if (error) {
-                                Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_ERROR, tableName));
-                                Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_REPAIRING));
-
-                                try {
-                                    query = "DELETE FROM " + purgePrefix + table;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-
-                                try {
-                                    query = "REINDEX " + ConfigHandler.prefix + table;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-
-                                try {
-                                    String index = " NOT INDEXED";
-                                    query = "INSERT INTO " + purgePrefix + table + " SELECT " + columns + " FROM " + ConfigHandler.prefix + table + index;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                    abort = true;
-                                    break;
-                                }
-
-                                try {
-                                    boolean purge = PURGE_TABLES.contains(table);
-
-                                    String blockRestriction = "";
-                                    if (hasBlockRestriction && restrictTables.contains(table)) {
-                                        blockRestriction = "type IN(" + includeBlockFinal + ") AND ";
-                                    }
-                                    else if (hasBlockRestriction) {
-                                        purge = false;
-                                    }
-
-                                    String worldRestriction = "";
-                                    if (argWid > 0 && worldTables.contains(table)) {
-                                        worldRestriction = " AND wid = '" + argWid + "'";
-                                    }
-                                    else if (argWid > 0) {
-                                        purge = false;
-                                    }
-
-                                    if (purge) {
-                                        query = "DELETE FROM " + purgePrefix + table + " WHERE " + blockRestriction + "time < '" + timeEnd + "' AND time >= '" + timeStart + "'" + worldRestriction;
-                                        preparedStmt = connection.prepareStatement(query);
-                                        preparedStmt.execute();
-                                        preparedStmt.close();
-                                    }
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-                            }
-
-                            if (PURGE_TABLES.contains(table)) {
-                                int oldCount = 0;
-                                try {
-                                    query = "SELECT COUNT(*) as count FROM " + ConfigHandler.prefix + table + " LIMIT 0, 1";
-                                    preparedStmt = connection.prepareStatement(query);
-                                    ResultSet resultSet = preparedStmt.executeQuery();
-                                    while (resultSet.next()) {
-                                        oldCount = resultSet.getInt("count");
-                                    }
-                                    resultSet.close();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-
-                                int new_count = 0;
-                                try {
-                                    query = "SELECT COUNT(*) as count FROM " + purgePrefix + table + " LIMIT 0, 1";
-                                    preparedStmt = connection.prepareStatement(query);
-                                    ResultSet resultSet = preparedStmt.executeQuery();
-                                    while (resultSet.next()) {
-                                        new_count = resultSet.getInt("count");
-                                    }
-                                    resultSet.close();
-                                    preparedStmt.close();
-                                }
-                                catch (Exception e) {
-                                    e.printStackTrace();
-                                }
-
-                                removed = removed + (oldCount - new_count);
-                            }
-                        }
-
-                        if (Config.getGlobal().MYSQL) {
-                            try {
-                                boolean purge = PURGE_TABLES.contains(table);
-
-                                String blockRestriction = "";
-                                if (hasBlockRestriction && restrictTables.contains(table)) {
-                                    blockRestriction = "type IN(" + includeBlockFinal + ") AND ";
-                                }
-                                else if (hasBlockRestriction) {
-                                    purge = false;
-                                }
-
-                                String worldRestriction = "";
-                                if (argWid > 0 && worldTables.contains(table)) {
-                                    worldRestriction = " AND wid = '" + argWid + "'";
-                                }
-                                else if (argWid > 0) {
-                                    purge = false;
-                                }
-
-                                if (purge) {
-                                    query = "DELETE FROM " + ConfigHandler.prefix + table + " WHERE " + blockRestriction + "time < '" + timeEnd + "' AND time >= '" + timeStart + "'" + worldRestriction;
-                                    preparedStmt = connection.prepareStatement(query);
-                                    preparedStmt.execute();
-                                    removed = removed + preparedStmt.getUpdateCount();
-                                    preparedStmt.close();
-                                }
-                            }
-                            catch (Exception e) {
-                                if (!ConfigHandler.serverRunning) {
-                                    Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_FAILED));
-                                    return;
-                                }
-
-                                e.printStackTrace();
-                            }
-                        }
-                    }
-
-                    if (Config.getGlobal().MYSQL && optimize) {
-                        Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_OPTIMIZING));
-                        for (String table : ConfigHandler.databaseTables) {
-                            query = "OPTIMIZE LOCAL TABLE " + ConfigHandler.prefix + table + "";
-                            preparedStmt = connection.prepareStatement(query);
-                            preparedStmt.execute();
-                            preparedStmt.close();
-                        }
-                    }
-
-                    connection.close();
-
-                    if (abort) {
-                        if (!Config.getGlobal().MYSQL) {
-                            (new File(ConfigHandler.path + ConfigHandler.sqlite + ".tmp")).delete();
-                        }
-                        ConfigHandler.loadDatabase();
-                        Chat.sendGlobalMessage(player, Color.RED + Phrase.build(Phrase.PURGE_ABORTED));
-                        Consumer.isPaused = false;
-                        ConfigHandler.purgeRunning = false;
-                        return;
-                    }
-
-                    if (!Config.getGlobal().MYSQL) {
-                        (new File(ConfigHandler.path + ConfigHandler.sqlite)).delete();
-                        (new File(ConfigHandler.path + ConfigHandler.sqlite + ".tmp")).renameTo(new File(ConfigHandler.path + ConfigHandler.sqlite));
-                    }
-
-                    ConfigHandler.loadDatabase();
-
-                    Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_SUCCESS));
-                    Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_ROWS, NumberFormat.getInstance().format(removed), (removed == 1 ? Selector.FIRST : Selector.SECOND)));
-                }
-                catch (Exception e) {
-                    Chat.sendGlobalMessage(player, Phrase.build(Phrase.PURGE_FAILED));
-                    e.printStackTrace();
-                }
-
-                Consumer.isPaused = false;
-                ConfigHandler.purgeRunning = false;
-            }
-        }
-
-        Runnable runnable = new BasicThread();
-        Thread thread = new Thread(runnable);
-        thread.start();
+        PurgeRequest request = new PurgeRequest(player, args, startTime, endTime, argWid, restrict.toString(), includeBlock, optimizeCheck, hasBlock, restrictCount, false);
+        startPurgeThread(request);
     }
 }

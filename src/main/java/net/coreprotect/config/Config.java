@@ -20,7 +20,6 @@ import org.bukkit.World;
 import net.coreprotect.CoreProtect;
 import net.coreprotect.language.Language;
 import net.coreprotect.thread.Scheduler;
-import net.coreprotect.utility.VersionUtils;
 
 public class Config extends Language {
 
@@ -106,7 +105,7 @@ public class Config extends Language {
         DEFAULT_VALUES.put("mysql-username", "root");
         DEFAULT_VALUES.put("mysql-password", "");
         DEFAULT_VALUES.put("language", "en");
-        DEFAULT_VALUES.put("auto-purge", "false");
+        DEFAULT_VALUES.put("auto-purge", "60d");
         DEFAULT_VALUES.put("check-updates", "true");
         DEFAULT_VALUES.put("api-enabled", "true");
         DEFAULT_VALUES.put("verbose", "true");
@@ -474,10 +473,6 @@ public class Config extends Language {
                 if (configuredValue != null) {
                     continue;
                 }
-                if (key.equals("auto-purge") && VersionUtils.isCommunityEdition()) {
-                    continue;
-                }
-
                 final String[] header = HEADERS.get(key);
 
                 if (header != null) {
