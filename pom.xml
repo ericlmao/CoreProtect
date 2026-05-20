@@ -272,6 +272,11 @@
       <version>2.25.4</version>
     </dependency>
     <dependency>
+      <groupId>com.github.luben</groupId>
+      <artifactId>zstd-jni</artifactId>
+      <version>1.5.7-4</version>
+    </dependency>
+    <dependency>
       <groupId>com.github.DeadSilenceIV</groupId>
       <artifactId>AdvancedChestsAPI</artifactId>
       <version>3.2-BETA</version>

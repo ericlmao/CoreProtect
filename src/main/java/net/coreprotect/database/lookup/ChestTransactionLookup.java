@@ -10,7 +10,9 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.command.CommandSender;
 
+import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.database.payload.PayloadResolver;
 import net.coreprotect.database.statement.UserStatement;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
@@ -73,9 +75,10 @@ public class ChestTransactionLookup {
 
             int totalPages = (int) Math.ceil(count / (limit + 0.0));
 
-            query = "SELECT time,user,action,type,data,amount,metadata,rolled_back FROM " + ConfigHandler.prefix + "container " + WorldUtils.getWidIndex("container") + "WHERE wid = '" + worldId + "' AND (x = '" + x + "' OR x = '" + x2 + "') AND (z = '" + z + "' OR z = '" + z2 + "') AND y = '" + y + "' ORDER BY rowid DESC LIMIT " + pageStart + ", " + limit + "";
+            String payloadColumn = Config.getGlobal().MYSQL ? "" : ",metadata_payload_id";
+            query = "SELECT time,user,action,type,data,amount,metadata,rolled_back" + payloadColumn + " FROM " + ConfigHandler.prefix + "container " + WorldUtils.getWidIndex("container") + "WHERE wid = '" + worldId + "' AND (x = '" + x + "' OR x = '" + x2 + "') AND (z = '" + z + "' OR z = '" + z2 + "') AND y = '" + y + "' ORDER BY rowid DESC LIMIT " + pageStart + ", " + limit + "";
             if (exact) {
-                query = "SELECT time,user,action,type,data,amount,metadata,rolled_back FROM " + ConfigHandler.prefix + "container " + WorldUtils.getWidIndex("container") + "WHERE wid = '" + worldId + "' AND (x = '" + l.getBlockX() + "') AND (z = '" + l.getBlockZ() + "') AND y = '" + y + "' ORDER BY rowid DESC LIMIT " + pageStart + ", " + limit + "";
+                query = "SELECT time,user,action,type,data,amount,metadata,rolled_back" + payloadColumn + " FROM " + ConfigHandler.prefix + "container " + WorldUtils.getWidIndex("container") + "WHERE wid = '" + worldId + "' AND (x = '" + l.getBlockX() + "') AND (z = '" + l.getBlockZ() + "') AND y = '" + y + "' ORDER BY rowid DESC LIMIT " + pageStart + ", " + limit + "";
             }
             results = statement.executeQuery(query);
             while (results.next()) {
@@ -86,7 +89,7 @@ public class ChestTransactionLookup {
                 long resultTime = results.getLong("time");
                 int resultAmount = results.getInt("amount");
                 int resultRolledBack = results.getInt("rolled_back");
-                byte[] resultMetadata = results.getBytes("metadata");
+                byte[] resultMetadata = PayloadResolver.getBytes(statement.getConnection(), results, "metadata", "metadata_payload_id");
                 String tooltip = ItemUtils.getEnchantments(resultMetadata, resultType, resultAmount);
 
                 if (ConfigHandler.playerIdCacheReversed.get(resultUserId) == null) {

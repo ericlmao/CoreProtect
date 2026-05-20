@@ -45,6 +45,10 @@ public class Config extends Language {
     public boolean DISABLE_WAL;
     public boolean HOVER_EVENTS;
     public boolean DATABASE_LOCK;
+    public boolean SQLITE_PAYLOAD_COMPRESSION_ENABLED;
+    public boolean SQLITE_PAYLOAD_DEDUPLICATE;
+    public boolean SQLITE_PAYLOAD_STORE_RAW_IF_LARGER;
+    public boolean SQLITE_PAYLOAD_KEEP_LEGACY_INLINE_VALUES;
     public boolean LOG_CANCELLED_CHAT;
     public boolean HOPPER_FILTER_META;
     public boolean DUPLICATE_SUPPRESSION;
@@ -91,9 +95,12 @@ public class Config extends Language {
     public boolean USERNAME_CHANGES;
     public boolean WORLDEDIT;
     public int MAXIMUM_POOL_SIZE;
+    public int SQLITE_PAYLOAD_COMPRESSION_ZSTD_LEVEL;
+    public int SQLITE_PAYLOAD_COMPRESSION_MIN_BYTES;
     public int MYSQL_PORT;
     public int DEFAULT_RADIUS;
     public int MAX_RADIUS;
+    public String SQLITE_PAYLOAD_COMPRESSION_CODEC;
 
     static {
         DEFAULT_VALUES.put("donation-key", "");
@@ -146,6 +153,13 @@ public class Config extends Language {
         DEFAULT_VALUES.put("player-sessions", "true");
         DEFAULT_VALUES.put("username-changes", "true");
         DEFAULT_VALUES.put("worldedit", "true");
+        DEFAULT_VALUES.put("database.sqlite.payload-compression.enabled", "false");
+        DEFAULT_VALUES.put("database.sqlite.payload-compression.codec", "zstd");
+        DEFAULT_VALUES.put("database.sqlite.payload-compression.zstd-level", "3");
+        DEFAULT_VALUES.put("database.sqlite.payload-compression.min-bytes", "128");
+        DEFAULT_VALUES.put("database.sqlite.payload-compression.deduplicate", "true");
+        DEFAULT_VALUES.put("database.sqlite.payload-compression.store-raw-if-larger", "true");
+        DEFAULT_VALUES.put("database.sqlite.payload-compression.keep-legacy-inline-values", "true");
 
         HEADERS.put("donation-key", new String[] { "# CoreProtect is donationware. Obtain a donation key from coreprotect.net/donate/" });
         HEADERS.put("use-mysql", new String[] { "# MySQL is optional and not required.", "# If you prefer to use MySQL, enable the following and fill out the fields." });
@@ -191,6 +205,11 @@ public class Config extends Language {
         HEADERS.put("player-sessions", new String[] { "# Logs the logins and logouts of players." });
         HEADERS.put("username-changes", new String[] { "# Logs when a player changes their Minecraft username." });
         HEADERS.put("worldedit", new String[] { "# Logs changes made via the plugin \"WorldEdit\" if it's in use on your server." });
+        HEADERS.put("database.sqlite.payload-compression.enabled", new String[] {
+                "# SQLite-only optional payload compression/deduplication.",
+                "# Hot lookup columns remain inline and indexed; only large optional BLOB payloads use co_payload.",
+                "# Keep disabled until you have a database backup and have tested lookups/rollbacks on your server."
+        });
     }
 
     private void readValues() {
@@ -203,8 +222,14 @@ public class Config extends Language {
         this.DUPLICATE_SUPPRESSION = this.getBoolean("duplicate-suppression", true);
         this.EXCLUDE_TNT = this.getBoolean("exclude-tnt", false);
         this.NETWORK_DEBUG = this.getBoolean("network-debug", false);
+        this.SQLITE_PAYLOAD_COMPRESSION_ENABLED = this.getBoolean("database.sqlite.payload-compression.enabled", false);
+        this.SQLITE_PAYLOAD_DEDUPLICATE = this.getBoolean("database.sqlite.payload-compression.deduplicate", true);
+        this.SQLITE_PAYLOAD_STORE_RAW_IF_LARGER = this.getBoolean("database.sqlite.payload-compression.store-raw-if-larger", true);
+        this.SQLITE_PAYLOAD_KEEP_LEGACY_INLINE_VALUES = this.getBoolean("database.sqlite.payload-compression.keep-legacy-inline-values", true);
         this.UNKNOWN_LOGGING = this.getBoolean("unknown-logging", false);
         this.MAXIMUM_POOL_SIZE = this.getInt("maximum-pool-size", 10);
+        this.SQLITE_PAYLOAD_COMPRESSION_ZSTD_LEVEL = Math.max(1, Math.min(22, this.getInt("database.sqlite.payload-compression.zstd-level", 3)));
+        this.SQLITE_PAYLOAD_COMPRESSION_MIN_BYTES = Math.max(1, this.getInt("database.sqlite.payload-compression.min-bytes", 128));
         this.DONATION_KEY = this.getString("donation-key");
         this.MYSQL = this.getBoolean("use-mysql");
         this.PREFIX = this.getString("table-prefix");
@@ -213,6 +238,7 @@ public class Config extends Language {
         this.MYSQL_DATABASE = this.getString("mysql-database");
         this.MYSQL_USERNAME = this.getString("mysql-username");
         this.MYSQL_PASSWORD = this.getString("mysql-password");
+        this.SQLITE_PAYLOAD_COMPRESSION_CODEC = this.getString("database.sqlite.payload-compression.codec");
         this.LANGUAGE = this.getString("language");
         this.AUTO_PURGE = this.getString("auto-purge");
         this.CHECK_UPDATES = this.getBoolean("check-updates");

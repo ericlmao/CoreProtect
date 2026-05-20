@@ -54,6 +54,9 @@ public class CommandHandler implements CommandExecutor {
                     else if (user.hasPermission("coreprotect.purge") && corecommand.equals("purge")) {
                         permission = true;
                     }
+                    else if (user.hasPermission("coreprotect.purge") && corecommand.equals("payload-backfill")) {
+                        permission = true;
+                    }
                     else if (user.hasPermission("coreprotect.lookup") && (corecommand.equals("l") || corecommand.equals("lookup") || corecommand.equals("page") || corecommand.equals("near"))) {
                         permission = true;
                     }
@@ -94,6 +97,9 @@ public class CommandHandler implements CommandExecutor {
                 }
                 else if (corecommand.equals("purge")) {
                     PurgeCommand.runCommand(user, permission, argumentArray);
+                }
+                else if (corecommand.equals("payload-backfill")) {
+                    PayloadBackfillCommand.runCommand(user, permission, argumentArray);
                 }
                 else if (corecommand.equals("inspect") || corecommand.equals("i")) {
                     InspectCommand.runCommand(user, permission, argumentArray);

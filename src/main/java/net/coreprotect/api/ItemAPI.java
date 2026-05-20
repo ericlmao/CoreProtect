@@ -10,6 +10,7 @@ import net.coreprotect.api.result.ItemResult;
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.database.Database;
+import net.coreprotect.database.payload.PayloadResolver;
 import net.coreprotect.database.logger.ItemLogger;
 import net.coreprotect.database.statement.UserStatement;
 import net.coreprotect.utility.WorldUtils;
@@ -40,7 +41,9 @@ public class ItemAPI {
                 return result;
             }
 
-            StringBuilder query = new StringBuilder("SELECT time,user,wid,x,y,z,type,data,amount,action,rolled_back FROM ");
+            StringBuilder query = new StringBuilder("SELECT time,user,wid,x,y,z,type,data,amount,action,rolled_back");
+            query.append(Config.getGlobal().MYSQL ? "" : ",data_payload_id");
+            query.append(" FROM ");
             query.append(ConfigHandler.prefix).append("item ");
             if (filter.hasLocation()) {
                 query.append(WorldUtils.getWidIndex("item"));
@@ -82,7 +85,7 @@ public class ItemAPI {
         return new ItemResult(
                 results.getLong("time"), username, WorldUtils.getWorldName(results.getInt("wid")),
                 results.getInt("x"), results.getInt("y"), results.getInt("z"),
-                results.getInt("type"), results.getInt("amount"), results.getBytes("data"),
+                results.getInt("type"), results.getInt("amount"), PayloadResolver.getBytes(connection, results, "data", "data_payload_id"),
                 results.getInt("action"), results.getInt("rolled_back")
         );
     }

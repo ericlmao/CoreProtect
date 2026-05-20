@@ -23,6 +23,7 @@ import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.consumer.Consumer;
 import net.coreprotect.consumer.Queue;
 import net.coreprotect.consumer.process.Process;
+import net.coreprotect.database.payload.PayloadStorage;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.model.BlockGroup;
 import net.coreprotect.model.rollback.RollbackUpdateTargets;
@@ -49,6 +50,7 @@ public class Database extends Queue {
     public static final int ITEM = 13;
 
     private static final Map<Integer, String> SQL_QUERIES = new HashMap<>();
+    private static final Map<Integer, String> SQLITE_PAYLOAD_SQL_QUERIES = new HashMap<>();
 
     static {
         // Initialize SQL queries for different table types
@@ -66,6 +68,11 @@ public class Database extends Queue {
         SQL_QUERIES.put(ART, "INSERT INTO %sprefix%art_map (id, art) VALUES (?, ?)");
         SQL_QUERIES.put(ENTITY_MAP, "INSERT INTO %sprefix%entity_map (id, entity) VALUES (?, ?)");
         SQL_QUERIES.put(BLOCKDATA, "INSERT INTO %sprefix%blockdata_map (id, data) VALUES (?, ?)");
+
+        SQLITE_PAYLOAD_SQL_QUERIES.put(BLOCK, "INSERT INTO %sprefix%block (time, user, wid, x, y, z, type, data, meta, blockdata, action, rolled_back, meta_payload_id, blockdata_payload_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        SQLITE_PAYLOAD_SQL_QUERIES.put(CONTAINER, "INSERT INTO %sprefix%container (time, user, wid, x, y, z, type, data, amount, metadata, action, rolled_back, metadata_payload_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        SQLITE_PAYLOAD_SQL_QUERIES.put(ITEM, "INSERT INTO %sprefix%item (time, user, wid, x, y, z, type, data, amount, action, rolled_back, data_payload_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        SQLITE_PAYLOAD_SQL_QUERIES.put(ENTITY, "INSERT INTO %sprefix%entity (time, data, data_payload_id) VALUES (?, ?, ?)");
     }
 
     public static void beginTransaction(Statement statement, boolean isMySQL) {
@@ -244,6 +251,9 @@ public class Database extends Queue {
         PreparedStatement preparedStatement = null;
         try {
             String query = SQL_QUERIES.get(type);
+            if (!Config.getGlobal().MYSQL && SQLITE_PAYLOAD_SQL_QUERIES.containsKey(type)) {
+                query = SQLITE_PAYLOAD_SQL_QUERIES.get(type);
+            }
             if (query != null) {
                 query = query.replace("%sprefix%", ConfigHandler.prefix);
                 preparedStatement = prepareStatement(connection, query, keys);
@@ -313,6 +323,9 @@ public class Database extends Queue {
     public static void createDatabaseTables(String prefix, boolean forcePrefix, Connection forceConnection, boolean mySQL, boolean purge) {
         ConfigHandler.databaseTables.clear();
         ConfigHandler.databaseTables.addAll(DATABASE_TABLES);
+        if (!mySQL) {
+            ConfigHandler.databaseTables.add("payload");
+        }
 
         if (mySQL) {
             createMySQLTables(prefix, forceConnection, purge);
@@ -530,6 +543,8 @@ public class Database extends Queue {
 
             identifyExistingTablesAndIndexes(statement, attachDatabase, tableData, indexData);
             createSQLiteTableStructures(prefix, statement, tableData);
+            createSQLitePayloadTable(statement, attachDatabase);
+            migrateSQLitePayloadColumns(prefix, statement, attachDatabase);
             createSQLiteIndexes(forcePrefix == true ? prefix : ConfigHandler.prefix, statement, indexData, attachDatabase, purge);
 
             if (!purge && forceConnection == null) {
@@ -614,6 +629,35 @@ public class Database extends Queue {
         }
     }
 
+    private static void createSQLitePayloadTable(Statement statement, String attachDatabase) throws SQLException {
+        statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + attachDatabase + PayloadStorage.TABLE + " (id INTEGER PRIMARY KEY, hash BLOB NOT NULL, codec INTEGER NOT NULL, uncompressed_size INTEGER NOT NULL, data BLOB NOT NULL, created_at INTEGER NOT NULL, UNIQUE(hash, uncompressed_size));");
+    }
+
+    private static void migrateSQLitePayloadColumns(String prefix, Statement statement, String attachDatabase) throws SQLException {
+        addSQLiteColumnIfMissing(statement, attachDatabase, prefix + "block", "meta_payload_id", "INTEGER");
+        addSQLiteColumnIfMissing(statement, attachDatabase, prefix + "block", "blockdata_payload_id", "INTEGER");
+        addSQLiteColumnIfMissing(statement, attachDatabase, prefix + "container", "metadata_payload_id", "INTEGER");
+        addSQLiteColumnIfMissing(statement, attachDatabase, prefix + "item", "data_payload_id", "INTEGER");
+        addSQLiteColumnIfMissing(statement, attachDatabase, prefix + "entity", "data_payload_id", "INTEGER");
+    }
+
+    private static void addSQLiteColumnIfMissing(Statement statement, String attachDatabase, String tableName, String columnName, String type) throws SQLException {
+        String tableInfoQuery = "PRAGMA table_info(" + tableName + ")";
+        if (attachDatabase.endsWith(".")) {
+            tableInfoQuery = "PRAGMA " + attachDatabase.substring(0, attachDatabase.length() - 1) + ".table_info(" + tableName + ")";
+        }
+
+        try (ResultSet rs = statement.executeQuery(tableInfoQuery)) {
+            while (rs.next()) {
+                if (columnName.equalsIgnoreCase(rs.getString("name"))) {
+                    return;
+                }
+            }
+        }
+
+        statement.executeUpdate("ALTER TABLE " + attachDatabase + tableName + " ADD COLUMN " + columnName + " " + type);
+    }
+
     private static void createSQLiteIndexes(String prefix, Statement statement, List<String> indexData, String attachDatabase, boolean purge) {
         try {
             createSQLiteIndex(statement, indexData, attachDatabase, "art_map_id_index", prefix + "art_map(id)");
@@ -646,6 +690,7 @@ public class Database extends Queue {
             createSQLiteIndex(statement, indexData, attachDatabase, "uuid_index", prefix + "user(uuid)");
             createSQLiteIndex(statement, indexData, attachDatabase, "username_log_uuid_index", prefix + "username_log(uuid,user)");
             createSQLiteIndex(statement, indexData, attachDatabase, "world_id_index", prefix + "world(id)");
+            createSQLiteIndex(statement, indexData, attachDatabase, "payload_hash_size_index", PayloadStorage.TABLE + "(hash,uncompressed_size)");
         }
         catch (Exception e) {
             Chat.console(Phrase.build(Phrase.DATABASE_INDEX_ERROR));
