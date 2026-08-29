@@ -21,6 +21,7 @@ public final class CompactProgress {
     private static volatile String phase;
     private static volatile long done;
     private static volatile long total;
+    private static volatile String detail;
 
     private CompactProgress() {
         throw new IllegalStateException("Utility class");
@@ -40,6 +41,28 @@ public final class CompactProgress {
         CompactProgress.phase = phase;
         CompactProgress.done = done;
         CompactProgress.total = total;
+        CompactProgress.detail = null;
+    }
+
+    /**
+     * Records what is happening now, saying how far along in its own terms.
+     *
+     * <p>
+     * A share of the whole is only worth reporting when the whole is small enough for the share to
+     * move. Returning freed space works through millions of pages a few thousand at a time, so a
+     * percentage sits on nought for minutes while a size does not.
+     * </p>
+     *
+     * @param phase
+     *            what is being done, in words
+     * @param detail
+     *            how far along, already in words
+     */
+    public static void set(String phase, String detail) {
+        CompactProgress.phase = phase;
+        CompactProgress.detail = detail;
+        CompactProgress.done = 0;
+        CompactProgress.total = 0;
     }
 
     /**
@@ -47,6 +70,7 @@ public final class CompactProgress {
      */
     public static void clear() {
         phase = null;
+        detail = null;
         done = 0;
         total = 0;
     }
@@ -58,6 +82,11 @@ public final class CompactProgress {
         String current = phase;
         if (current == null) {
             return null;
+        }
+
+        String described = detail;
+        if (described != null) {
+            return current + " (" + described + ")";
         }
 
         long finished = done;

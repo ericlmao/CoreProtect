@@ -381,6 +381,7 @@ public class Database extends Queue {
             // to hand back; asked for in one go it holds the write lock for minutes, and everything
             // else that wants to write gives up waiting. Asked for in pieces, the lock is released
             // between them and logging carries on.
+            long pageSize = pragmaValue(statement, "PRAGMA page_size");
             long previous = Long.MAX_VALUE;
             long free = freePages(statement);
             long outstanding = free;
@@ -397,7 +398,8 @@ public class Database extends Queue {
                 // transaction, and SQLite does not hand the lock out in turn: taking it back the
                 // instant it is released keeps anything else waiting out for as long as this runs,
                 // however short each transaction is. After a large compact this runs for minutes.
-                CompactProgress.set("returning freed space", outstanding - free, outstanding);
+                CompactProgress.set("returning freed space", ColdStorageStats.format((outstanding - free) * pageSize)
+                        + " of " + ColdStorageStats.format(outstanding * pageSize));
                 yieldWriteLock(System.currentTimeMillis() - started);
                 if (stop != null) {
                     try {
@@ -429,6 +431,12 @@ public class Database extends Queue {
         }
         catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private static long pragmaValue(Statement statement, String pragma) throws SQLException {
+        try (ResultSet results = statement.executeQuery(pragma)) {
+            return results.next() ? results.getLong(1) : 0;
         }
     }
 

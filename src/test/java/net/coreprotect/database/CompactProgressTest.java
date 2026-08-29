@@ -123,6 +123,38 @@ class CompactProgressTest {
     }
 
     @Test
+    void aPhaseTooLargeForAPercentageSaysHowMuchItHasDone() {
+        // Returning freed space works through millions of pages a few thousand at a time. As a share
+        // of the whole that is a fraction of one percent a go, so it reads as nought for minutes and
+        // looks like nothing is happening. A size moves.
+        CompactProgress.set("returning freed space", "2.10 GB of 74.8 GB");
+        assertEquals("returning freed space (2.10 GB of 74.8 GB)", CompactProgress.line());
+
+        // And setting it the other way again drops what was said before, rather than keeping it.
+        CompactProgress.set("packing entity data", 1, 4);
+        assertEquals("packing entity data (25%)", CompactProgress.line());
+    }
+
+    @Test
+    void reclaimingSpaceReportsSomethingThatMoves() throws Exception {
+        // Enough pages that a percentage would round to nothing for the first several batches.
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("DELETE FROM co_entity");
+        }
+
+        List<String> seen = new ArrayList<>();
+        Database.reclaimFreePages(connection, () -> {
+            String line = CompactProgress.line();
+            if (line != null && (seen.isEmpty() || !seen.get(seen.size() - 1).equals(line))) {
+                seen.add(line);
+            }
+        });
+
+        assertTrue(!seen.isEmpty(), "returning space said what it was doing: " + seen);
+        assertTrue(seen.get(seen.size() - 1).contains(" of "), "and said it as an amount: " + seen.get(seen.size() - 1));
+    }
+
+    @Test
     void packingActuallyReportsWhileItRuns() throws Exception {
         // The reporter is only worth anything if the work sets it, so this runs the real packing and
         // collects what it would have said.
