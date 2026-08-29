@@ -383,6 +383,7 @@ public class Database extends Queue {
             // between them and logging carries on.
             long previous = Long.MAX_VALUE;
             long free = freePages(statement);
+            long outstanding = free;
             long returned = 0;
             while (free > 0 && free < previous && returned < maximumPages) {
                 long batch = Math.min(Math.min(free, RECLAIM_PAGES), maximumPages - returned);
@@ -396,6 +397,7 @@ public class Database extends Queue {
                 // transaction, and SQLite does not hand the lock out in turn: taking it back the
                 // instant it is released keeps anything else waiting out for as long as this runs,
                 // however short each transaction is. After a large compact this runs for minutes.
+                CompactProgress.set("returning freed space", outstanding - free, outstanding);
                 yieldWriteLock(System.currentTimeMillis() - started);
                 if (stop != null) {
                     try {

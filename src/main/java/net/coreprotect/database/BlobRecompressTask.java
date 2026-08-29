@@ -127,6 +127,7 @@ public final class BlobRecompressTask {
         }
 
         if (!BlobDictionary.hasDictionary()) {
+            CompactProgress.set("learning how this server's data compresses", 0, 0);
             trainDictionary(connection);
         }
         if (!BlobDictionary.hasDictionary()) {
@@ -283,6 +284,7 @@ public final class BlobRecompressTask {
                 recordSaving(connection, batchSaved);
             }
 
+            CompactProgress.set("packing " + table + " data", frontier, limit);
             if (++batches % BATCHES_PER_RECLAIM == 0) {
                 Database.reclaimFreePages(connection, callback, RECLAIM_BUDGET);
             }
@@ -443,6 +445,7 @@ public final class BlobRecompressTask {
             if (batchSaved > 0) {
                 recordSaving(connection, batchSaved);
             }
+            CompactProgress.set("compressing the newest " + table + " data", frontier, highest);
             pause(System.currentTimeMillis() - started);
         }
 

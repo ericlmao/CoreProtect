@@ -12,6 +12,7 @@ import net.coreprotect.consumer.Consumer;
 import net.coreprotect.database.BlobRecompressTask;
 import net.coreprotect.database.ColdRollupTask;
 import net.coreprotect.database.ColdStorageStats;
+import net.coreprotect.database.CompactProgress;
 import net.coreprotect.database.Database;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
@@ -57,6 +58,12 @@ public class CompactCommand {
         worker.start();
     }
 
+    /** Seconds between saying how far along the compact is. */
+    private static final long PROGRESS_INTERVAL = 15;
+
+    /** When the next progress line is due, so a long run says something without saying it constantly. */
+    private static long nextProgress;
+
     private static void compact(CommandSender player) {
         Consumer.OperationStartResult startResult = Consumer.claimBackgroundPurge();
         if (startResult != Consumer.OperationStartResult.STARTED) {
@@ -67,6 +74,7 @@ public class CompactCommand {
         Connection connection = null;
         try {
             Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_STARTED));
+            nextProgress = (System.currentTimeMillis() / 1000L) + PROGRESS_INTERVAL;
 
             for (int attempt = 0; attempt < 6 && connection == null; attempt++) {
                 connection = Database.getConnection(false, 500);
@@ -84,19 +92,20 @@ public class CompactCommand {
             // for the hot window to expire.
             // Anything an earlier build left numbered underneath the segments is put back above them
             // first, or it can never be sealed.
-            ColdRollupTask.repairRowIds(connection, CompactCommand::checkCancelled);
+            ColdRollupTask.repairRowIds(connection, () -> tick(player));
 
             long sealBefore = (System.currentTimeMillis() / 1000L) + 1;
-            long sealed = ColdRollupTask.rollUp(connection, CompactCommand::checkCancelled, sealBefore);
+            long sealed = ColdRollupTask.rollUp(connection, () -> tick(player), sealBefore);
             // Segments written by older builds have no per player counts, which lookups rely on to
             // avoid opening segments that hold nothing for the player being searched for.
-            ColdRollupTask.backfillStatistics(connection, CompactCommand::checkCancelled);
+            ColdRollupTask.backfillStatistics(connection, () -> tick(player));
             // Entity data is read one row at a time and so never reaches a segment. It is compressed
             // where it lies instead, against a dictionary that supplies the repetition a single blob
             // of a couple of kilobytes does not contain.
-            long blobBytes = BlobRecompressTask.run(connection, CompactCommand::checkCancelled);
-            reclaimSpace(connection);
+            long blobBytes = BlobRecompressTask.run(connection, () -> tick(player));
+            reclaimSpace(connection, player);
 
+            CompactProgress.clear();
             Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_COMPLETED, NumberFormat.getInstance().format(sealed), (sealed == 1 ? Selector.FIRST : Selector.SECOND)));
             if (blobBytes > 0) {
                 Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_BLOBS, ColdStorageStats.format(blobBytes)));
@@ -132,10 +141,12 @@ public class CompactCommand {
      *
      * @param connection
      *            an open connection
+     * @param player
+     *            whoever asked for the compact, told how it is going
      */
-    private static void reclaimSpace(Connection connection) {
+    private static void reclaimSpace(Connection connection, CommandSender player) {
         try {
-            Database.reclaimFreePages(connection, CompactCommand::checkCancelled);
+            Database.reclaimFreePages(connection, () -> tick(player));
             try (Statement statement = connection.createStatement()) {
                 statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
             }
@@ -153,6 +164,30 @@ public class CompactCommand {
      * @throws InterruptedException
      *             if the run should stop
      */
+    /**
+     * Called between pieces of work: stops the run when the database is needed elsewhere, and says
+     * how far along it is often enough to show it is moving without filling the console.
+     *
+     * @param player
+     *            whoever asked for the compact
+     * @throws InterruptedException
+     *             if the run should stop
+     */
+    private static void tick(CommandSender player) throws InterruptedException {
+        checkCancelled();
+
+        long now = System.currentTimeMillis() / 1000L;
+        if (now < nextProgress) {
+            return;
+        }
+        nextProgress = now + PROGRESS_INTERVAL;
+
+        String progress = CompactProgress.line();
+        if (progress != null) {
+            Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_PROGRESS, progress));
+        }
+    }
+
     private static void checkCancelled() throws InterruptedException {
         if (!ConfigHandler.serverRunning || ConfigHandler.purgeRunning || ConfigHandler.converterRunning || ConfigHandler.migrationRunning || Consumer.isPersistenceHalted()) {
             throw new InterruptedException("Compacting stopped");

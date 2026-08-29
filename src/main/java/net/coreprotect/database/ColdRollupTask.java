@@ -166,10 +166,12 @@ public final class ColdRollupTask {
         }
 
         long updated = 0;
+        long examined = 0;
         String update = "UPDATE " + ConfigHandler.prefix + "segment SET user_stats = ?, type_stats = ?, action_stats = ?, spawn_filter = ? WHERE id = ?";
         try (PreparedStatement statement = connection.prepareStatement(update)) {
             for (Long id : pending) {
                 callback.beforeSegment();
+                CompactProgress.set("checking compressed storage", ++examined, pending.size());
 
                 SQLiteColdIndex.ColdSegment segment = SQLiteColdIndex.segmentById(connection, id);
                 if (segment == null) {
@@ -322,6 +324,7 @@ public final class ColdRollupTask {
             writeSegment(connection, tableId, table, block, layout, frames, scalarFrame, payloadFrame, dictionaryId);
             SQLiteColdIndex.reload(connection);
             sealed = sealed + block.rowIds.size();
+            CompactProgress.set("packing " + table + " into compressed storage", sealed, 0);
         }
 
         return sealed;
@@ -474,6 +477,7 @@ public final class ColdRollupTask {
         for (String table : SQLiteColdIndex.getSegmentedTables()) {
             callback.beforeSegment();
 
+            CompactProgress.set("checking row numbering", 0, 0);
             long highWater = SQLiteColdIndex.coldHighWaterMark(table);
             if (highWater == 0) {
                 continue;
