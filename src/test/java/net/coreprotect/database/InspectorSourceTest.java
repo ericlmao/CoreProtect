@@ -149,10 +149,64 @@ class InspectorSourceTest {
         }
     }
 
+    @Test
+    void anEntityLookupOpensOnlyTheSegmentsHoldingThatEntity() throws Exception {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("CREATE TABLE co_entity_interaction (time INTEGER, user INTEGER, entity_spawn_rowid INTEGER NOT NULL, wid INTEGER, x INTEGER, y INTEGER, z INTEGER, type INTEGER, action INTEGER, metadata BLOB, rolled_back INTEGER);");
+        }
+
+        // A segment never spans a day, so an entity per day puts each in a segment of its own. That
+        // is what makes the next assertion mean something: two of the three must not be opened.
+        writeInteractions(1, 300);
+        writeInteractions(2, 300);
+        writeInteractions(3, 300);
+        seal();
+        assertEquals(3, segmentCount(), "one segment per entity");
+
+        long boundary = ColdSegmentReadCounter.reads();
+        try (InspectorSource source = InspectorSource.openForEntity(connection, "entity_interaction", 2)) {
+            try (Statement statement = connection.createStatement();
+                    ResultSet results = statement.executeQuery("SELECT COUNT(*) FROM " + source.table() + " WHERE entity_spawn_rowid = 2")) {
+                assertTrue(results.next());
+                assertEquals(300, results.getLong(1), "the entity's rows are found in compressed storage");
+            }
+        }
+        long read = ColdSegmentReadCounter.reads() - boundary;
+
+        // The point of recording which entities a segment holds is not having to open the others.
+        assertEquals(1, read, "only the segment holding that entity was opened");
+    }
+
+    private void writeInteractions(int spawnRowId, int rows) throws SQLException {
+        connection.setAutoCommit(false);
+        String insert = "INSERT INTO co_entity_interaction (time,user,entity_spawn_rowid,wid,x,y,z,type,action,metadata,rolled_back) VALUES (?,?,?," + WORLD + ",?," + Y + ",?,1,2,NULL,0)";
+        try (PreparedStatement statement = connection.prepareStatement(insert)) {
+            for (int row = 1; row <= rows; row++) {
+                statement.setLong(1, base() + (spawnRowId * DAY) + row);
+                statement.setInt(2, 1 + (row % 5));
+                statement.setInt(3, spawnRowId);
+                statement.setInt(4, X + spawnRowId);
+                statement.setInt(5, Z + spawnRowId);
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+        connection.commit();
+        connection.setAutoCommit(true);
+    }
+
     private long countThrough(InspectorSource source) throws SQLException {
         String query = "SELECT COUNT(*) FROM " + source.table() + " " + source.index()
                 + "WHERE wid = " + WORLD + " AND x = " + X + " AND z = " + Z + " AND y = " + Y;
         try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery(query)) {
+            assertTrue(results.next());
+            return results.getLong(1);
+        }
+    }
+
+    private long segmentCount() throws SQLException {
+        try (Statement statement = connection.createStatement();
+                ResultSet results = statement.executeQuery("SELECT COUNT(*) FROM co_segment WHERE table_id = " + SQLiteColdIndex.tableId("entity_interaction"))) {
             assertTrue(results.next());
             return results.getLong(1);
         }

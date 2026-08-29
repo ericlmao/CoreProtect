@@ -139,7 +139,7 @@ public final class SQLiteSchema {
                 + "row_count INTEGER NOT NULL, min_time INTEGER NOT NULL, max_time INTEGER NOT NULL, day INTEGER NOT NULL, "
                 + "wid_set BLOB, chunk_filter BLOB, user_filter BLOB, type_filter BLOB, action_bits INTEGER NOT NULL, "
                 + "dict_id INTEGER NOT NULL, codec_version INTEGER NOT NULL, scalars BLOB NOT NULL, scalars_size INTEGER NOT NULL, "
-                + "payload BLOB, payload_size INTEGER NOT NULL, user_stats BLOB, type_stats BLOB, action_stats BLOB);");
+                + "payload BLOB, payload_size INTEGER NOT NULL, user_stats BLOB, type_stats BLOB, action_stats BLOB, spawn_filter BLOB);");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS " + prefix + "segment_rowid_index ON " + prefix + "segment(table_id,end_rowid);");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS " + prefix + "segment_time_index ON " + prefix + "segment(table_id,max_time);");
 
@@ -163,6 +163,9 @@ public final class SQLiteSchema {
         addSegmentColumn(prefix, statement, "user_stats");
         addSegmentColumn(prefix, statement, "type_stats");
         addSegmentColumn(prefix, statement, "action_stats");
+        // Which entities a segment holds rows for, so the inspector can look one up without opening
+        // segments that hold nothing of it.
+        addSegmentColumn(prefix, statement, "spawn_filter");
 
         recordSchemaVersion(prefix, statement);
     }

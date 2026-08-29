@@ -146,7 +146,8 @@ public final class ColdRollupTask {
      */
     public static long backfillStatistics(Connection connection, Callback callback) throws Exception {
         List<Long> pending = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement("SELECT id FROM " + ConfigHandler.prefix + "segment WHERE user_stats IS NULL OR action_stats IS NULL ORDER BY id");
+        try (PreparedStatement statement = connection.prepareStatement("SELECT id FROM " + ConfigHandler.prefix + "segment WHERE user_stats IS NULL OR action_stats IS NULL"
+                        + " OR (spawn_filter IS NULL AND table_id IN(" + SQLiteColdIndex.entityKeyedTableIds() + ")) ORDER BY id");
                 ResultSet results = statement.executeQuery()) {
             while (results.next()) {
                 pending.add(results.getLong(1));
@@ -164,7 +165,7 @@ public final class ColdRollupTask {
         }
 
         long updated = 0;
-        String update = "UPDATE " + ConfigHandler.prefix + "segment SET user_stats = ?, type_stats = ?, action_stats = ? WHERE id = ?";
+        String update = "UPDATE " + ConfigHandler.prefix + "segment SET user_stats = ?, type_stats = ?, action_stats = ?, spawn_filter = ? WHERE id = ?";
         try (PreparedStatement statement = connection.prepareStatement(update)) {
             for (Long id : pending) {
                 callback.beforeSegment();
@@ -194,7 +195,8 @@ public final class ColdRollupTask {
                 int userColumn = columnIndex(layout, "user");
                 int typeColumn = columnIndex(layout, "type");
                 int actionColumn = columnIndex(layout, "action");
-                if (userColumn < 0 && typeColumn < 0 && actionColumn < 0) {
+                int spawnColumn = columnIndex(layout, "entity_spawn_rowid");
+                if (userColumn < 0 && typeColumn < 0 && actionColumn < 0 && spawnColumn < 0) {
                     continue;
                 }
 
@@ -202,8 +204,12 @@ public final class ColdRollupTask {
                 Map<Long, Integer> userCounts = new HashMap<>();
                 Map<Long, Integer> typeCounts = new HashMap<>();
                 Map<Long, Integer> actionCounts = new HashMap<>();
+                Set<Long> spawnIds = new LinkedHashSet<>();
                 for (int row = 0; row < rows.size(); row++) {
                     Object[] values = rows.getValues(row);
+                    if (spawnColumn >= 0 && values[spawnColumn] != null && spawnIds.size() <= SegmentMembership.MAXIMUM_EXACT_VALUES) {
+                        spawnIds.add(((Number) values[spawnColumn]).longValue());
+                    }
                     if (userColumn >= 0 && values[userColumn] != null && userCounts.size() <= SegmentStatistics.MAXIMUM_VALUES) {
                         userCounts.merge(((Number) values[userColumn]).longValue(), 1, Integer::sum);
                     }
@@ -218,7 +224,8 @@ public final class ColdRollupTask {
                 statement.setBytes(1, SegmentStatistics.encode(userCounts));
                 statement.setBytes(2, SegmentStatistics.encode(typeCounts));
                 statement.setBytes(3, SegmentStatistics.encode(actionCounts));
-                statement.setLong(4, id);
+                statement.setBytes(4, spawnColumn < 0 ? null : SegmentMembership.encode(toArray(spawnIds)));
+                statement.setLong(5, id);
                 statement.executeUpdate();
                 updated++;
             }
@@ -333,8 +340,8 @@ public final class ColdRollupTask {
     private static void writeSegment(Connection connection, int tableId, String table, Block block, SQLiteColdIndex.TableLayout layout, ColdSegmentCodec.Frames frames, byte[] scalarFrame, byte[] payloadFrame, int dictionaryId) throws SQLException {
         String insert = "INSERT INTO " + ConfigHandler.prefix + "segment (table_id,start_rowid,end_rowid,row_count,min_time,max_time,day,"
                 + "wid_set,chunk_filter,user_filter,type_filter,action_bits,dict_id,codec_version,scalars,scalars_size,payload,payload_size,"
-                + "user_stats,type_stats,action_stats) "
-                + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                + "user_stats,type_stats,action_stats,spawn_filter) "
+                + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
@@ -361,6 +368,7 @@ public final class ColdRollupTask {
                 statement.setBytes(19, SegmentStatistics.encode(block.userCounts));
                 statement.setBytes(20, SegmentStatistics.encode(block.typeCounts));
                 statement.setBytes(21, SegmentStatistics.encode(block.actionCounts));
+                statement.setBytes(22, SegmentMembership.encode(toArray(block.spawnIds)));
                 statement.executeUpdate();
             }
 
@@ -396,6 +404,7 @@ public final class ColdRollupTask {
         private final Set<Integer> worldIds = new LinkedHashSet<>();
         private final Set<Long> userIds = new LinkedHashSet<>();
         private final Set<Long> typeIds = new LinkedHashSet<>();
+        private final Set<Long> spawnIds = new LinkedHashSet<>();
         private final Map<Long, Integer> userCounts = new HashMap<>();
         private final Map<Long, Integer> typeCounts = new HashMap<>();
         private final Map<Long, Integer> actionCounts = new HashMap<>();
@@ -420,6 +429,7 @@ public final class ColdRollupTask {
         int userColumn = columnIndex(layout, "user");
         int typeColumn = columnIndex(layout, "type");
         int actionColumn = columnIndex(layout, "action");
+        int spawnColumn = columnIndex(layout, "entity_spawn_rowid");
         long day = -1;
 
         try (PreparedStatement statement = connection.prepareStatement(query)) {
@@ -482,6 +492,10 @@ public final class ColdRollupTask {
                         if (block.typeCounts.size() <= SegmentStatistics.MAXIMUM_VALUES) {
                             block.typeCounts.merge(typeId, 1, Integer::sum);
                         }
+                    }
+
+                    if (spawnColumn >= 0 && values[spawnColumn] != null && block.spawnIds.size() <= SegmentMembership.MAXIMUM_EXACT_VALUES) {
+                        block.spawnIds.add(((Number) values[spawnColumn]).longValue());
                     }
 
                     if (actionColumn >= 0 && values[actionColumn] != null) {

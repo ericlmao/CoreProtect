@@ -98,6 +98,43 @@ public final class InspectorSource implements AutoCloseable {
         }
     }
 
+    /**
+     * Opens the rows belonging to one entity.
+     *
+     * <p>
+     * These rows are found by the entity rather than by where they happened, so there are no
+     * coordinates to narrow the segments down with. Each segment records which entities it holds rows
+     * for instead, which does the same job: only the segments that could hold something of this
+     * entity are opened.
+     * </p>
+     *
+     * @param connection
+     *            an open connection
+     * @param table
+     *            an unprefixed table name
+     * @param spawnRowId
+     *            the entity's spawn row id
+     * @return the source to read from, which must be closed
+     */
+    public static InspectorSource openForEntity(Connection connection, String table, long spawnRowId) {
+        String live = ConfigHandler.prefix + table;
+        if (!ConfigHandler.databaseType.isSQLite()) {
+            return new InspectorSource(live, "", connection, false);
+        }
+
+        try {
+            SQLiteColdIndex.beginLookup(0, 0);
+            SQLiteColdIndex.setSpawnFilter(new long[] { spawnRowId });
+            String expression = SQLiteColdIndex.sourceExpression(connection, table, 0, null);
+            return new InspectorSource(expression, "", connection, true);
+        }
+        catch (SQLException exception) {
+            ErrorReporter.report(exception);
+            SQLiteColdIndex.endLookup(connection);
+            return new InspectorSource(live, "", connection, false);
+        }
+    }
+
     @Override
     public void close() {
         if (!opened) {

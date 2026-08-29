@@ -133,7 +133,14 @@ public class ChestTransactionLookup {
                 results = statement.executeQuery(query);
             }
             else {
-                if (entitySpawnRowId == null) {
+                if (entitySpawnRowId != null) {
+                    // Rows about an entity are narrowed by which segments hold rows for it, since
+                    // there are no coordinates to narrow them by.
+                    source = InspectorSource.openForEntity(statement.getConnection(), tableName, entitySpawnRowId);
+                    table = source.table();
+                    index = source.index();
+                }
+                else {
                     // Compressed storage as well as the live rows. A lookup by entity instead of by
                     // place has no coordinates to narrow the segments down with, so it is left to the
                     // live rows rather than opening every segment there is.

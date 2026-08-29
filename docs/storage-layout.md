@@ -98,9 +98,11 @@ That is affordable because the coordinates narrow it down: only the segments who
 the block are opened, and only the rows in them at those coordinates are handed to the query. A click
 costs about what a small lookup costs.
 
-Two of the inspector's views are keyed by entity rather than by place — the contents of an entity's
-inventory, and interactions with an entity — and have no coordinates to narrow segments down with.
-Those still read the live tables only, since the alternative would be opening every segment there is.
+Two of its views are keyed by an entity rather than by a place — the contents of an entity's
+inventory, and interactions with an entity. They have no coordinates to go on, so each segment also
+records which entities it holds rows for, and a lookup about one entity opens only the segments that
+could hold something of it. Segments written before that was recorded gain it on the next
+`/co compact`.
 
 ## Limits
 

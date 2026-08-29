@@ -69,6 +69,21 @@ public final class SQLiteColdIndex {
     }
 
     /**
+     * @return the segment table ids of the tables whose rows belong to an entity rather than a place,
+     *         as a comma separated list for use in a query
+     */
+    public static String entityKeyedTableIds() {
+        StringBuilder ids = new StringBuilder();
+        for (String table : new String[] { "entity_container", "entity_interaction" }) {
+            Integer id = SEGMENTED_TABLES.get(table);
+            if (id != null) {
+                ids.append(ids.length() > 0 ? "," : "").append(id);
+            }
+        }
+        return ids.length() > 0 ? ids.toString() : "-1";
+    }
+
+    /**
      * @param table
      *            an unprefixed table name
      * @return the segment table id, or null when the table is never segmented
@@ -90,11 +105,12 @@ public final class SQLiteColdIndex {
         final SegmentFilter chunkFilter;
         final SegmentMembership userFilter;
         final SegmentMembership typeFilter;
+        final SegmentMembership spawnFilter;
         final SegmentStatistics userStats;
         final SegmentStatistics typeStats;
         final SegmentStatistics actionStats;
 
-        ColdSegment(long id, int tableId, long startRowId, long endRowId, int rowCount, long minTime, long maxTime, int[] worldIds, SegmentFilter chunkFilter, SegmentMembership userFilter, SegmentMembership typeFilter, SegmentStatistics userStats, SegmentStatistics typeStats, SegmentStatistics actionStats) {
+        ColdSegment(long id, int tableId, long startRowId, long endRowId, int rowCount, long minTime, long maxTime, int[] worldIds, SegmentFilter chunkFilter, SegmentMembership userFilter, SegmentMembership typeFilter, SegmentMembership spawnFilter, SegmentStatistics userStats, SegmentStatistics typeStats, SegmentStatistics actionStats) {
             this.id = id;
             this.tableId = tableId;
             this.startRowId = startRowId;
@@ -106,6 +122,7 @@ public final class SQLiteColdIndex {
             this.chunkFilter = chunkFilter;
             this.userFilter = userFilter;
             this.typeFilter = typeFilter;
+            this.spawnFilter = spawnFilter;
             this.userStats = userStats;
             this.typeStats = typeStats;
             this.actionStats = actionStats;
@@ -166,6 +183,7 @@ public final class SQLiteColdIndex {
         final int userColumn;
         final int typeColumn;
         final int actionColumn;
+        final int spawnColumn;
 
         TableLayout(String[] columns, int[] types, String[] declaredTypes) {
             this.columns = columns;
@@ -179,6 +197,7 @@ public final class SQLiteColdIndex {
             this.userColumn = indexOf(columns, "user");
             this.typeColumn = indexOf(columns, "type");
             this.actionColumn = indexOf(columns, "action");
+            this.spawnColumn = indexOf(columns, "entity_spawn_rowid");
         }
 
         private static int indexOf(String[] columns, String name) {
@@ -263,7 +282,7 @@ public final class SQLiteColdIndex {
      */
     public static void reload(Connection connection) throws SQLException {
         Map<Integer, List<ColdSegment>> loadedSegments = new HashMap<>();
-        String query = "SELECT id,table_id,start_rowid,end_rowid,row_count,min_time,max_time,wid_set,chunk_filter,user_filter,type_filter,user_stats,type_stats,action_stats FROM " + ConfigHandler.prefix + "segment ORDER BY table_id,start_rowid";
+        String query = "SELECT id,table_id,start_rowid,end_rowid,row_count,min_time,max_time,wid_set,chunk_filter,user_filter,type_filter,spawn_filter,user_stats,type_stats,action_stats FROM " + ConfigHandler.prefix + "segment ORDER BY table_id,start_rowid";
         try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery(query)) {
             while (results.next()) {
                 int tableId = results.getInt("table_id");
@@ -279,6 +298,7 @@ public final class SQLiteColdIndex {
                         SegmentFilter.fromBytes(results.getBytes("chunk_filter")),
                         SegmentMembership.decode(results.getBytes("user_filter")),
                         SegmentMembership.decode(results.getBytes("type_filter")),
+                        SegmentMembership.decode(results.getBytes("spawn_filter")),
                         SegmentStatistics.decode(results.getBytes("user_stats")),
                         SegmentStatistics.decode(results.getBytes("type_stats")),
                         SegmentStatistics.decode(results.getBytes("action_stats")));
@@ -365,6 +385,7 @@ public final class SQLiteColdIndex {
         private long[] users;
         private long[] types;
         private long[] actions;
+        private long[] spawns;
         private long rowBudget;
         private boolean truncated;
         private long plannedOffset;
@@ -647,6 +668,26 @@ public final class SQLiteColdIndex {
     }
 
     /**
+     * Restricts a lookup to the rows of particular entities.
+     *
+     * <p>
+     * Rows about an entity are found by the entity's row id rather than by where they happened, so
+     * there are no coordinates to narrow the segments down with. Each segment records which entities
+     * it holds rows for, which serves the same purpose: a lookup about one entity opens only the
+     * segments that could hold something of it.
+     * </p>
+     *
+     * @param spawnRowIds
+     *            the entity spawn row ids wanted, or null for no restriction
+     */
+    public static void setSpawnFilter(long[] spawnRowIds) {
+        LookupContext context = LOOKUP.get();
+        if (context != null) {
+            context.spawns = spawnRowIds;
+        }
+    }
+
+    /**
      * Marks the end of a lookup and drops anything it materialized.
      *
      * @param connection
@@ -698,7 +739,7 @@ public final class SQLiteColdIndex {
         long[] actions = context == null ? null : context.actions;
         Exclusions excluded = exclusions(context);
         List<ColdSegment> selected = selectSegments(connection, table, worldId, bounds, startTime, endTime, null);
-        selected = restrictToIdentifiers(selected, users, types);
+        selected = restrictToIdentifiers(selected, users, types, context == null ? null : context.spawns);
         if (selected.isEmpty()) {
             return hotTable;
         }
@@ -975,8 +1016,8 @@ public final class SQLiteColdIndex {
      *            the block type ids the lookup wants, or null
      * @return the segments still worth reading
      */
-    private static List<ColdSegment> restrictToIdentifiers(List<ColdSegment> selected, long[] users, long[] types) {
-        if ((users == null && types == null) || selected.isEmpty()) {
+    private static List<ColdSegment> restrictToIdentifiers(List<ColdSegment> selected, long[] users, long[] types, long[] spawns) {
+        if ((users == null && types == null && spawns == null) || selected.isEmpty()) {
             return selected;
         }
 
@@ -992,6 +1033,11 @@ public final class SQLiteColdIndex {
                 continue;
             }
             if (types != null && segment.typeStats == null && segment.typeFilter != null && !segment.typeFilter.mightContainAny(types)) {
+                continue;
+            }
+            // A lookup about one entity is answered by the few segments that hold rows for it, which
+            // is what makes reading them affordable when there are no coordinates to go on.
+            if (spawns != null && segment.spawnFilter != null && !segment.spawnFilter.mightContainAny(spawns)) {
                 continue;
             }
             kept.add(segment);
@@ -1252,7 +1298,8 @@ public final class SQLiteColdIndex {
             connection.setAutoCommit(false);
         }
         try (PreparedStatement statement = connection.prepareStatement(insert.toString())) {
-            ColdSegmentCodec.RowFilter rowFilter = rowFilter(layout, worldId, bounds, startTime, endTime, users, types, actions, excluded);
+            ColdSegmentCodec.RowFilter rowFilter = rowFilter(layout, worldId, bounds, startTime, endTime, users, types, actions, excluded,
+                    context == null ? null : context.spawns);
             long budget = context == null ? 0 : context.rowBudget;
             List<ColdSegment> order = selected;
 
@@ -1548,10 +1595,15 @@ public final class SQLiteColdIndex {
      * @return the filter, or null when the lookup wants everything
      */
     private static ColdSegmentCodec.RowFilter rowFilter(TableLayout layout, int worldId, Integer[] bounds, long startTime, long endTime, long[] users, long[] types, long[] actions, Exclusions excluded) {
+        return rowFilter(layout, worldId, bounds, startTime, endTime, users, types, actions, excluded, null);
+    }
+
+    private static ColdSegmentCodec.RowFilter rowFilter(TableLayout layout, int worldId, Integer[] bounds, long startTime, long endTime, long[] users, long[] types, long[] actions, Exclusions excluded, long[] spawns) {
         boolean checkBounds = bounds != null && bounds.length >= 7 && layout.xColumn >= 0 && layout.zColumn >= 0;
         long[] wantedUsers = layout.userColumn >= 0 ? sorted(users) : null;
         long[] wantedTypes = layout.typeColumn >= 0 ? sorted(types) : null;
         long[] wantedActions = layout.actionColumn >= 0 ? sorted(actions) : null;
+        long[] wantedSpawns = layout.spawnColumn >= 0 ? sorted(spawns) : null;
         Exclusions exclusions = excluded == null ? Exclusions.NONE : excluded;
         long[] unwantedUsers = layout.userColumn >= 0 ? sorted(exclusions.users) : null;
         long[] unwantedTypes = layout.typeColumn >= 0 ? sorted(exclusions.types) : null;
@@ -1560,7 +1612,7 @@ public final class SQLiteColdIndex {
         boolean checkTime = layout.timeColumn >= 0 && (startTime > 0 || endTime > 0);
 
         if (!checkBounds && !checkWorld && !checkTime && wantedUsers == null && wantedTypes == null && wantedActions == null
-                && unwantedUsers == null && unwantedTypes == null && unwantedActions == null) {
+                && wantedSpawns == null && unwantedUsers == null && unwantedTypes == null && unwantedActions == null) {
             return null;
         }
 
@@ -1581,6 +1633,9 @@ public final class SQLiteColdIndex {
                 return false;
             }
             if (wantedActions != null && present[layout.actionColumn] && Arrays.binarySearch(wantedActions, columns[layout.actionColumn]) < 0) {
+                return false;
+            }
+            if (wantedSpawns != null && present[layout.spawnColumn] && Arrays.binarySearch(wantedSpawns, columns[layout.spawnColumn]) < 0) {
                 return false;
             }
             if (unwantedUsers != null && present[layout.userColumn] && Arrays.binarySearch(unwantedUsers, columns[layout.userColumn]) >= 0) {
