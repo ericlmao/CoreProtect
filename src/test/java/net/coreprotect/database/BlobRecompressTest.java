@@ -151,6 +151,23 @@ class BlobRecompressTest {
     }
 
     @Test
+    void packedEntityDataCountsAsCompressedStorage() throws Exception {
+        // Packing entity data does not seal a single segment, so if only segments counted the
+        // compressed total would sit still while the live total fell, which reads as data going
+        // missing rather than as compression working.
+        ColdStorageStats before = ColdStorageStats.read(connection);
+        assertNotNull(before);
+
+        BlobRecompressTask.run(connection, () -> {
+        });
+
+        ColdStorageStats after = ColdStorageStats.read(connection);
+        assertTrue(after.getBlobBytes() > 0, "the packed data is measured");
+        assertTrue(after.getColdBytes() > before.getColdBytes(), "and counted as compressed storage");
+        assertTrue(after.getHotBytes() < before.getHotBytes(), "while the live total falls");
+    }
+
+    @Test
     void theSavingAddsUpAcrossRuns() throws Exception {
         int[] batches = { 0 };
         assertThrows(InterruptedException.class, () -> BlobRecompressTask.run(connection, () -> {

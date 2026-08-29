@@ -78,16 +78,18 @@ if interrupted. Groups whose rows have all been removed by retention are dropped
 
 ### Where this shows up in `/co status`
 
-Entity data lives in the live tables, so compressing it makes **Hot Data** fall while **Cold Data**
-stays where it is — cold means segments, and entity rows never become segments. So that a falling
-hot size is not mistaken for data going missing, `/co status` also reports what the compression has
-saved:
+Packed entity data counts towards **Cold Data** along with the segments, because it is compressed
+storage too even though it is not a segment. `/co status` breaks it out so it is clear where the
+compressed total comes from, and reports what packing it saved:
 
 ```text
-Hot Data: 2.10 GB (recent activity, fully indexed).
-Cold Data: 212.0 MB (132,294,578 rows compressed).
-Entity Data: compressed in place, saving 51.0 GB.
+Hot Data: 1.40 GB (recent activity, fully indexed).
+Cold Data: 892.0 MB (132,294,578 rows compressed).
+Entity Data: 680.0 MB packed, saving 51.0 GB.
 ```
+
+The row count beside Cold Data counts rows held in segments. Packed entity blobs belong to rows that
+are still in the live tables, so they add to the compressed size without adding to that count.
 
 ## The inspector
 
