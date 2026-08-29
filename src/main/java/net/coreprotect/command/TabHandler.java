@@ -88,6 +88,7 @@ public class TabHandler implements TabCompleter {
         addCompletionIfPermitted(sender, "coreprotect.restore", "restore", completions);
         addCompletionIfPermitted(sender, "coreprotect.lookup", "lookup", completions);
         addCompletionIfPermitted(sender, "coreprotect.purge", "purge", completions);
+        addCompletionIfPermitted(sender, "coreprotect.purge", "compact", completions);
         addCompletionIfPermitted(sender, "coreprotect.reload", "reload", completions);
         addCompletionIfPermitted(sender, "coreprotect.status", "status", completions);
         addCompletionIfPermitted(sender, "coreprotect.lookup.near", "near", completions);

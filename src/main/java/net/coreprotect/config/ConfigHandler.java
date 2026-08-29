@@ -41,6 +41,8 @@ import net.coreprotect.database.ConsumerWriteBatch.ReferenceKind;
 import net.coreprotect.database.Database;
 import net.coreprotect.database.DatabaseType;
 import net.coreprotect.database.DuckDBNativeSupport;
+import net.coreprotect.database.LegacyImport;
+import net.coreprotect.database.SQLiteSchema;
 import net.coreprotect.database.clickhouse.ClickHouseDatabase;
 import net.coreprotect.database.clickhouse.ClickHouseJdbcConfig;
 import net.coreprotect.database.statement.UserStatement;
@@ -115,6 +117,7 @@ public class ConfigHandler extends Queue {
     public static final String BLACKLIST_FILENAME = "blacklist.txt";
 
     public static HikariDataSource hikariDataSource = null;
+    public static HikariDataSource sqliteDataSource = null;
     public static final SystemUtils.ProcessorInfo processorInfo = SystemUtils.getProcessorInfo();
     public static final boolean isSpigot = VersionUtils.isSpigot();
     public static final boolean isPaper = VersionUtils.isPaper();
@@ -518,6 +521,14 @@ public class ConfigHandler extends Queue {
                 }
 
                 Class.forName(ConfigHandler.databaseType.isDuckDB() ? "org.duckdb.DuckDBDriver" : "org.sqlite.JDBC");
+
+                if (ConfigHandler.databaseType.isSQLite()) {
+                    java.nio.file.Path archived = SQLiteSchema.prepareDatabaseFile();
+                    if (archived != null) {
+                        Chat.sendConsoleMessage(Color.YELLOW + "[CoreProtect] " + Phrase.build(Phrase.DATABASE_LAYOUT_UPGRADED, archived.getFileName().toString()));
+                    }
+                    ConfigHandler.sqliteDataSource = createSQLiteDataSource();
+                }
             } catch (Exception e) {
                 ErrorReporter.report(e);
             }
@@ -562,6 +573,41 @@ public class ConfigHandler extends Queue {
         }
 
         Database.createDatabaseTables(ConfigHandler.prefix, false, null, ConfigHandler.databaseType, false);
+    }
+
+    /**
+     * Builds the connection pool used for the embedded SQLite database.
+     *
+     * <p>
+     * Every pooled connection is opened with the same pragmas, so write-ahead logging and the
+     * busy timeout apply to all database work rather than only to the connection that created
+     * the tables.
+     * </p>
+     *
+     * @return a pool bound to the configured SQLite database file
+     */
+    private static HikariDataSource createSQLiteDataSource() {
+        boolean walEnabled = !Config.getGlobal().DISABLE_WAL;
+        HikariConfig config = new HikariConfig();
+        config.setPoolName("CoreProtect-SQLite");
+        config.setJdbcUrl("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+        // SQLite allows a single writer, plus concurrent readers while write-ahead logging is enabled.
+        config.setMaximumPoolSize(walEnabled ? Math.max(2, Math.min(ConfigHandler.maximumPoolSize, 5)) : 1);
+        config.setMinimumIdle(1);
+        config.setConnectionTimeout(10000);
+        // The database is a local file, so connections are never retired for age.
+        config.setMaxLifetime(0);
+        config.setKeepaliveTime(0);
+        config.setIdleTimeout(600000);
+        config.addDataSourceProperty("journal_mode", walEnabled ? "WAL" : "DELETE");
+        config.addDataSourceProperty("synchronous", walEnabled ? "NORMAL" : "FULL");
+        config.addDataSourceProperty("busy_timeout", "30000");
+        config.addDataSourceProperty("cache_size", "-16384");
+        config.addDataSourceProperty("mmap_size", "268435456");
+        // Temporary tables stay on disk. A lookup that reaches far back through compressed storage
+        // can build a very large one, and holding that in memory can take the server down.
+        config.addDataSourceProperty("temp_store", "FILE");
+        return new HikariDataSource(config);
     }
 
     public static boolean loadMaterials(Statement statement) {
@@ -926,6 +972,10 @@ public class ConfigHandler extends Queue {
             return false;
         }
 
+        // A database left here to be imported has to be read before anything is cached from the
+        // one being imported into, or live logging would give the same materials different ids.
+        LegacyImport.importReferenceTables();
+
         try (Connection connection = Database.getConnection(true, 0)) {
             Statement statement = connection.createStatement();
 
@@ -950,6 +1000,9 @@ public class ConfigHandler extends Queue {
             if (startup) {
                 ConfigHandler.serverRunning = true; // Set as running before patching
             }
+            // Started before the version check, because an imported database that predates this
+            // build has to be complete before the upgrade scripts rewrite its rows.
+            LegacyImport.importActivityTables(connection);
             boolean validVersion = Patch.versionCheck(statement); // Minor upgrades & version check
             boolean databaseLock = true;
             if (startup) {

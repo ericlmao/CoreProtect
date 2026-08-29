@@ -158,7 +158,7 @@ public class ChestTransactionLookup {
                 int resultX = results.getInt("x");
                 int resultY = results.getInt("y");
                 int resultZ = results.getInt("z");
-                byte[] resultMetadata = DatabaseUtils.getBytes(results, "metadata");
+                byte[] resultMetadata = DatabaseUtils.getBlobBytes(results, "metadata");
                 String tooltip = ItemUtils.getEnchantments(resultMetadata, resultType, resultAmount);
 
                 String resultUser = UserStatement.getName(statement.getConnection(), resultUserId);

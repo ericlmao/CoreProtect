@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -22,7 +23,6 @@ import net.coreprotect.CoreProtect;
 import net.coreprotect.consumer.Consumer;
 import net.coreprotect.language.Language;
 import net.coreprotect.thread.Scheduler;
-import net.coreprotect.utility.VersionUtils;
 
 public class Config extends Language {
 
@@ -52,6 +52,8 @@ public class Config extends Language {
     public String LANGUAGE;
     public String AUTO_PURGE;
     public String AUTO_PURGE_TIME;
+    public boolean BLOB_COMPRESSION;
+    public boolean COLD_DEBUG;
     public boolean ENABLE_SSL;
     public boolean CLICKHOUSE_TLS;
     public boolean DISABLE_WAL;
@@ -108,12 +110,15 @@ public class Config extends Language {
     public int CLICKHOUSE_PORT;
     public int CLICKHOUSE_CONSUMER_DELAY;
     public int MYSQL_PORT;
+    public int BLOB_COMPRESSION_LEVEL;
+    public int HOT_BLOB_COMPRESSION_LEVEL;
+    public int COLD_MAX_ROWS;
+    public long HOT_WINDOW_SECONDS;
     public int DEFAULT_RADIUS;
     public int DUCKDB_THREADS;
     public int MAX_RADIUS;
 
     static {
-        DEFAULT_VALUES.put("donation-key", "");
         DEFAULT_VALUES.put("database-type", "duckdb");
         DEFAULT_VALUES.put("table-prefix", "co_");
         DEFAULT_VALUES.put("mysql-host", "127.0.0.1");
@@ -130,9 +135,14 @@ public class Config extends Language {
         DEFAULT_VALUES.put("duckdb-memory-limit", "512MB");
         DEFAULT_VALUES.put("duckdb-threads", "3");
         DEFAULT_VALUES.put("duckdb-max-temp-directory-size", "10GB");
+        DEFAULT_VALUES.put("blob-compression", "true");
+        DEFAULT_VALUES.put("blob-compression-level", "19");
+        DEFAULT_VALUES.put("hot-blob-compression-level", "3");
+        DEFAULT_VALUES.put("hot-window", "7d");
+        DEFAULT_VALUES.put("cold-max-rows", "1000000");
         DEFAULT_VALUES.put("language", "en");
-        DEFAULT_VALUES.put("auto-purge", "false");
-        DEFAULT_VALUES.put("check-updates", "true");
+        DEFAULT_VALUES.put("auto-purge", "180d");
+        DEFAULT_VALUES.put("auto-purge-time", "00:00");
         DEFAULT_VALUES.put("error-reporting", "true");
         DEFAULT_VALUES.put("api-enabled", "true");
         DEFAULT_VALUES.put("verbose", "true");
@@ -175,15 +185,19 @@ public class Config extends Language {
         DEFAULT_VALUES.put("username-changes", "true");
         DEFAULT_VALUES.put("worldedit", "true");
 
-        HEADERS.put("donation-key", new String[] { "# CoreProtect is donationware. Obtain a donation key from coreprotect.net/donate/" });
         HEADERS.put("database-type", new String[] { "# Database engine used by CoreProtect. Valid values are duckdb, clickhouse, sqlite, and mysql.", "# Run /co reload or restart the server after changing the database engine or connection target." });
         HEADERS.put("mysql-host", new String[] { "# Connection settings for MySQL." });
         HEADERS.put("clickhouse-host", new String[] { "# Connection settings for ClickHouse 25.6 or newer.", "# The configured database must already exist; CoreProtect creates its prefixed tables and views.", "# Multiple writers require database-lock disabled, the same version and prefix, separate data directories, and direct connections to one physical server.", "# Keep writer clocks synchronized; a shared prefix is one logical namespace for worlds and players.", "# Do not reassign usernames, and record UUID-bearing logins before UUID-less activity under a changed name.", "# Stop every writer before migration or purge; purge requires database-lock on the remaining server.", "# Replicated, distributed, and load-balanced independent ClickHouse nodes are unsupported." });
         HEADERS.put("duckdb-memory-limit", new String[] { "# Resource limits for the embedded DuckDB database.", "# The memory limit controls DuckDB's buffer manager; the temporary limit caps spill data and is not preallocated." });
-        HEADERS.put("language", new String[] { "# If modified, will automatically attempt to translate languages phrases.", "# List of language codes: https://coreprotect.net/languages/" });
-        HEADERS.put("auto-purge", new String[] { "# Automatically purge data older than the configured time.", "# Examples: 30d, 12w, 6mo. Set to false to disable." });
-        HEADERS.put("check-updates", new String[] { "# If enabled, CoreProtect will check for updates when your server starts up.", "# If an update is available, you'll be notified via your server console.", });
-        HEADERS.put("error-reporting", new String[] { "# Automatically sends errors to the plugin author." });
+        HEADERS.put("blob-compression", new String[] { "# Compresses the item, block, and entity data stored in the database using Zstandard.", "# Compressed data lets the database retain far more history in the same amount of disk space.", "# Existing uncompressed data stays readable, so this can be enabled or disabled at any time.", "# Only used by SQLite and MySQL; DuckDB and ClickHouse compress their own storage." });
+        HEADERS.put("blob-compression-level", new String[] { "# Zstandard compression level, from 1 (fastest) to 22 (smallest), used when data is", "# rolled up into compressed storage." });
+        HEADERS.put("hot-window", new String[] { "# How much recent history stays in the fast, fully indexed tables.", "# Older data is packed into compressed storage, which is several times smaller but", "# slower to search. Examples: 3d, 7d, 30d. SQLite only." });
+        HEADERS.put("cold-max-rows", new String[] { "# A safety limit on how many rows a single lookup will read out of compressed storage.", "# Pages are normally planned so that only the rows around them are read, so this only", "# applies to searches that cannot be planned, such as those using exclusions or filters." });
+        HEADERS.put("hot-blob-compression-level", new String[] { "# Zstandard compression level used for freshly logged data, which is recompressed", "# later at the level above. Keep this low so logging stays cheap." });
+        HEADERS.put("language", new String[] { "# The language file to use, read from the CoreProtect folder." });
+        HEADERS.put("auto-purge", new String[] { "# Automatically purge data older than the configured time.", "# Examples: 30d, 12w, 6mo. The minimum value is 30d.", "# Automatic purging is always enabled; this setting controls how much history is kept.", "# Rows are deleted in place, in small batches, without ever duplicating the database." });
+        HEADERS.put("auto-purge-time", new String[] { "# The time of day, in 24-hour HH:mm server time, that the automatic purge runs." });
+        HEADERS.put("error-reporting", new String[] { "# Records detailed error reports in the server log. Nothing is ever sent anywhere." });
         HEADERS.put("api-enabled", new String[] { "# If enabled, other plugins will be able to utilize the CoreProtect API.", });
         HEADERS.put("verbose", new String[] { "# If enabled, extra data is displayed during rollbacks and restores.", "# Can be manually triggered by adding \"#verbose\" to your rollback command." });
         HEADERS.put("default-radius", new String[] { "# If no radius is specified in a rollback or restore, this value will be", "# used as the radius. Set to \"0\" to disable automatically adding a radius." });
@@ -261,6 +275,12 @@ public class Config extends Language {
         this.LANGUAGE = this.getString("language");
         this.AUTO_PURGE = this.getString("auto-purge");
         this.AUTO_PURGE_TIME = this.getString("auto-purge-time");
+        this.BLOB_COMPRESSION = this.getBoolean("blob-compression", true);
+        this.COLD_DEBUG = this.getBoolean("cold-debug", false);
+        this.BLOB_COMPRESSION_LEVEL = this.getInt("blob-compression-level", 19);
+        this.HOT_BLOB_COMPRESSION_LEVEL = this.getInt("hot-blob-compression-level", 3);
+        this.HOT_WINDOW_SECONDS = parseDuration(this.getString("hot-window"), 604800L);
+        this.COLD_MAX_ROWS = Math.max(10000, this.getInt("cold-max-rows", 1000000));
         this.CHECK_UPDATES = this.getBoolean("check-updates");
         this.ERROR_REPORTING = this.getBoolean("error-reporting");
         this.API_ENABLED = this.getBoolean("api-enabled");
@@ -376,6 +396,86 @@ public class Config extends Language {
         configured = configured.replaceAll("[^0-9]", "");
 
         return configured.isEmpty() ? dfl : Integer.parseInt(configured);
+    }
+
+    /**
+     * Parses a duration written in the style CoreProtect commands use, such as {@code 7d} or
+     * {@code 12w}. A plain number is read as a number of days.
+     *
+     * @param value
+     *            the configured value
+     * @param dfl
+     *            the value to use when the setting is missing or cannot be read
+     * @return the duration in seconds
+     */
+    public static long parseDuration(final String value, final long dfl) {
+        if (value == null) {
+            return dfl;
+        }
+
+        final String input = value.trim().toLowerCase(Locale.ROOT).replace(" ", "");
+        if (input.isEmpty()) {
+            return dfl;
+        }
+
+        long total = 0;
+        long amount = 0;
+        boolean hasAmount = false;
+        boolean hasUnit = false;
+
+        for (int index = 0; index < input.length(); index++) {
+            final char character = input.charAt(index);
+            if (character >= '0' && character <= '9') {
+                amount = (amount * 10) + (character - '0');
+                hasAmount = true;
+                continue;
+            }
+
+            if (!hasAmount) {
+                return dfl;
+            }
+
+            long unit;
+            if (character == 'm' && input.startsWith("mo", index)) {
+                unit = 2592000L;
+                index++;
+            }
+            else if (character == 'y') {
+                unit = 31536000L;
+            }
+            else if (character == 'w') {
+                unit = 604800L;
+            }
+            else if (character == 'd') {
+                unit = 86400L;
+            }
+            else if (character == 'h') {
+                unit = 3600L;
+            }
+            else if (character == 'm') {
+                unit = 60L;
+            }
+            else if (character == 's') {
+                unit = 1L;
+            }
+            else {
+                return dfl;
+            }
+
+            total = total + (amount * unit);
+            amount = 0;
+            hasAmount = false;
+            hasUnit = true;
+        }
+
+        if (hasAmount && !hasUnit) {
+            return amount * 86400L;
+        }
+        if (hasAmount) {
+            return dfl;
+        }
+
+        return total == 0 ? dfl : total;
     }
 
     private String getString(final String key) {
@@ -533,9 +633,6 @@ public class Config extends Language {
                 final String configuredValue = this.config.get(key);
 
                 if (configuredValue != null) {
-                    continue;
-                }
-                if (key.equals("auto-purge") && VersionUtils.isCommunityEdition()) {
                     continue;
                 }
                 if (key.equals("database-type") && !writeHeader) {

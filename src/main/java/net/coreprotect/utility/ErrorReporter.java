@@ -1,10 +1,5 @@
 package net.coreprotect.utility;
 
-import java.io.DataOutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -13,7 +8,10 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.bukkit.Bukkit;
@@ -24,9 +22,6 @@ import net.coreprotect.config.ConfigHandler;
 
 public final class ErrorReporter {
 
-    private static final String REPORT_URL = "https://error-reporting.coreprotect.net/";
-    private static final int CONNECTION_TIMEOUT = 5000;
-    private static final int READ_TIMEOUT = 5000;
     private static final int MAX_QUEUE_SIZE = 100;
     private static final int MAX_FRAMES = 32;
     private static final int MAX_CAUSE_DEPTH = 4;
@@ -34,7 +29,7 @@ public final class ErrorReporter {
     private static final Set<String> SENT_FINGERPRINTS = Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
     private static final LinkedBlockingQueue<JSONObject> QUEUE = new LinkedBlockingQueue<>(MAX_QUEUE_SIZE);
     private static final AtomicBoolean WORKER_RUNNING = new AtomicBoolean(false);
-    private static volatile ReportSender sender = ErrorReporter::sendHttp;
+    private static volatile ReportSender sender = ErrorReporter::logLocally;
 
     private ErrorReporter() {
         throw new IllegalStateException("Utility class");
@@ -49,14 +44,14 @@ public final class ErrorReporter {
     }
 
     static void setSender(ReportSender reportSender) {
-        sender = reportSender == null ? ErrorReporter::sendHttp : reportSender;
+        sender = reportSender == null ? ErrorReporter::logLocally : reportSender;
     }
 
     static void reset() {
         SENT_FINGERPRINTS.clear();
         QUEUE.clear();
         WORKER_RUNNING.set(false);
-        sender = ErrorReporter::sendHttp;
+        sender = ErrorReporter::logLocally;
     }
 
     private static boolean reportInternal(Throwable throwable, boolean printStackTrace) {
@@ -277,41 +272,20 @@ public final class ErrorReporter {
         }
     }
 
-    private static void sendHttp(JSONObject report) throws Exception {
-        String postData = "data=" + URLEncoder.encode(report.toJSONString(), StandardCharsets.UTF_8.name());
-        byte[] bytes = postData.getBytes(StandardCharsets.UTF_8);
-        HttpURLConnection connection = null;
-
-        try {
-            URL url = new URL(REPORT_URL);
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod("POST");
-            connection.setRequestProperty("Accept-Charset", "UTF-8");
-            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=utf-8");
-            connection.setRequestProperty("User-Agent", "CoreProtect/v" + safePluginVersion() + " (by Intelli)");
-            connection.setRequestProperty("Content-Length", Integer.toString(bytes.length));
-            connection.setDoOutput(true);
-            connection.setInstanceFollowRedirects(true);
-            connection.setUseCaches(false);
-            connection.setConnectTimeout(CONNECTION_TIMEOUT);
-            connection.setReadTimeout(READ_TIMEOUT);
-
-            try (DataOutputStream outputStream = new DataOutputStream(connection.getOutputStream())) {
-                outputStream.write(bytes);
-            }
-
-            connection.getResponseCode();
-        }
-        finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
-        }
+    /**
+     * Writes a report to the server log instead of sending it anywhere. This build never transmits
+     * error reports, so problems stay on the machine that produced them.
+     *
+     * @param report
+     *            the report to record
+     */
+    private static void logLocally(JSONObject report) {
+        Logger.getLogger("Minecraft").log(Level.WARNING, "[CoreProtect] {0}", report.toJSONString());
     }
 
     private static String safePluginVersion() {
         try {
-            return VersionUtils.getPluginVersion() + ConfigHandler.EDITION_BRANCH;
+            return VersionUtils.getPluginVersion();
         }
         catch (Exception e) {
             return "";

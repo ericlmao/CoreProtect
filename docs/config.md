@@ -51,6 +51,21 @@ Create the configured database first with a database engine that provides persis
 
 Multiple active CoreProtect installations may share one ClickHouse database and prefix when `database-lock` is disabled. Configure every installation to use the same CoreProtect version, direct endpoint to the same physical ClickHouse server, and prefix, with a separate CoreProtect data directory; do not use a load balancer across independent nodes. Keep their system clocks synchronized; events recorded by different installations in the same second have an unspecified relative order. A shared prefix is one logical namespace: use globally unique world names unless same-named worlds are intentionally the same world, because their coordinate history is combined. Player attribution assumes that a username is not reassigned to a different account within that namespace and that a UUID-bearing login precedes UUID-less activity under a changed name. UUID-bearing observations preserve an account ID through ordinary username changes, but simultaneous username changes and username reuse are outside the base shared-writer contract. A server may continue displaying a peer's previously cached username until it observes that player locally or CoreProtect reloads. ClickHouse has no cross-server maintenance fence without Keeper, so every purge is rejected while `database-lock` is disabled. To purge a shared namespace, stop every installation sharing it, enable `database-lock` on the one installation that will run the purge, and restart or reload that installation before purging. Follow the same stop-all rule before a database migration; the migration command updates only the installation that runs it, so update the other configurations before restarting them. Replicated and distributed tables remain unsupported.
 
+## Data Compression
+
+SQLite installations keep recent activity in fast indexed tables and pack older activity into compressed storage, which measured 11x smaller than the previous layout on a test database. See the [storage layout guide](/storage-layout/) for how it works and what it changes.
+
+```yaml
+hot-window: 7d
+blob-compression: true
+blob-compression-level: 19
+hot-blob-compression-level: 3
+```
+
+`hot-window` decides how much recent history stays instantly searchable before it is compressed. `blob-compression-level` (1 fastest, 22 smallest) applies when data is compressed for storage; `hot-blob-compression-level` applies to freshly logged data, which is recompressed properly later, so keeping it low keeps logging cheap.
+
+DuckDB and ClickHouse compress their own storage, so these settings do not apply to them, and MySQL stores item data compressed but is otherwise unchanged. If the Zstandard native library cannot be loaded on your system, CoreProtect logs a warning and stores data uncompressed.
+
 ## Per-World Configuration
 
 If you'd like to modify the logging settings for a specific world, simply do the following:

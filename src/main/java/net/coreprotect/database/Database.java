@@ -22,6 +22,8 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 
+import com.zaxxer.hikari.HikariDataSource;
+
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.consumer.Consumer;
@@ -417,8 +419,7 @@ public class Database extends Queue {
                     }
                 }
 
-                String database = "jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite + "";
-                connection = DriverManager.getConnection(database);
+                connection = openSQLiteConnection();
 
                 ConfigHandler.databaseReachable = true;
             }
@@ -500,7 +501,36 @@ public class Database extends Queue {
         return true;
     }
 
+    /**
+     * Opens a SQLite connection from the connection pool, falling back to a direct connection
+     * when the pool has not been created yet.
+     *
+     * @return an open SQLite connection
+     * @throws SQLException
+     *             if a connection cannot be obtained
+     */
+    private static Connection openSQLiteConnection() throws SQLException {
+        HikariDataSource dataSource = ConfigHandler.sqliteDataSource;
+        if (dataSource != null && !dataSource.isClosed()) {
+            return dataSource.getConnection();
+        }
+        return DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+    }
+
     public static void closeConnection() {
+        SQLiteColdIndex.invalidate();
+        SegmentDictionary.clearCache();
+        if (ConfigHandler.sqliteDataSource != null) {
+            try {
+                ConfigHandler.sqliteDataSource.close();
+            }
+            catch (Exception e) {
+                ErrorReporter.report(e);
+            }
+            finally {
+                ConfigHandler.sqliteDataSource = null;
+            }
+        }
         if (ConfigHandler.hikariDataSource != null) {
             try {
                 ConfigHandler.hikariDataSource.close();
@@ -583,7 +613,7 @@ public class Database extends Queue {
             connection = requireClickHouseDatabase().openConnection();
         }
         else {
-            connection = DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+            connection = openSQLiteConnection();
         }
 
         String sql = "SELECT 1 FROM " + ConfigHandler.prefix + "database_lock WHERE rowid=1 AND status=" + DATABASE_LOCK_MIGRATION_INCOMPLETE + " LIMIT 1";
@@ -660,8 +690,63 @@ public class Database extends Queue {
                     continue;
                 }
             }
+
+            // Rows that have already been rolled into compressed storage are not in the live table
+            // any more. Their new state is recorded alongside the segments instead, which the
+            // lookups apply when they read those rows back.
+            updated = updated + recordColdRollbackState(statement, tableName, rolledBack, rowIds.subList(startIndex, endIndex));
+            if (updated >= expected) {
+                continue;
+            }
             throw new SQLException("Expected " + expected + " rolled-back row updates in " + tableName + ", updated " + updated);
         }
+    }
+
+    /**
+     * Records the rolled back state of rows that live in compressed storage.
+     *
+     * @param statement
+     *            a statement on the database being updated
+     * @param tableName
+     *            the unprefixed table the rows belong to
+     * @param rolledBack
+     *            the state to record
+     * @param rowIds
+     *            the rows being updated
+     * @return the number of rows that were recorded
+     * @throws SQLException
+     *             if the state cannot be recorded
+     */
+    private static int recordColdRollbackState(Statement statement, String tableName, int rolledBack, List<Long> rowIds) throws SQLException {
+        Integer tableId = SQLiteColdIndex.tableId(tableName);
+        if (!ConfigHandler.databaseType.isSQLite() || tableId == null) {
+            return 0;
+        }
+
+        long highWater = SQLiteColdIndex.coldHighWaterMark(tableName);
+        if (highWater <= 0) {
+            return 0;
+        }
+
+        int recorded = 0;
+        String insert = "INSERT OR REPLACE INTO " + ConfigHandler.prefix + "cold_flag (table_id,rowid_ref,rolled_back) VALUES (?,?,?)";
+        try (PreparedStatement preparedStatement = statement.getConnection().prepareStatement(insert)) {
+            for (Long rowId : rowIds) {
+                if (rowId == null || rowId > highWater) {
+                    continue;
+                }
+                preparedStatement.setInt(1, tableId);
+                preparedStatement.setLong(2, rowId);
+                preparedStatement.setInt(3, rolledBack);
+                preparedStatement.addBatch();
+                recorded++;
+            }
+            if (recorded > 0) {
+                preparedStatement.executeBatch();
+            }
+        }
+
+        return recorded;
     }
 
     private static int getRolledBackUpdateBatchSize() {
@@ -1004,6 +1089,11 @@ public class Database extends Queue {
 
                 identifyExistingTablesAndIndexes(statement, attachDatabase, tableData, indexData);
                 String tablePrefix = forcePrefix ? prefix : ConfigHandler.prefix;
+                if (!purge && forceConnection == null && tableData.isEmpty()) {
+                    // A brand new database: settings that are baked into the file itself have to be
+                    // applied before the first table is written.
+                    SQLiteSchema.applyFileSettings(statement);
+                }
                 boolean createChatMessagePrefixIndex = !tableData.contains(tablePrefix + "chat");
                 boolean createCommandMessagePrefixIndex = !tableData.contains(tablePrefix + "command");
                 boolean createSignMessagePrefixIndexes = !tableData.contains(tablePrefix + "sign");
@@ -1011,6 +1101,7 @@ public class Database extends Queue {
                 createSQLiteIndexes(tablePrefix, statement, indexData, attachDatabase, purge, createChatMessagePrefixIndex, createCommandMessagePrefixIndex, createSignMessagePrefixIndexes);
 
                 if (!purge && forceConnection == null) {
+                    SQLiteSchema.createTables(tablePrefix, statement);
                     initializeTables(prefix, statement, DatabaseType.SQLITE);
                 }
             }

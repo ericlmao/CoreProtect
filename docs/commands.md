@@ -13,6 +13,7 @@ ___
 | [/co rollback](#co-rollback) | Rollback block data |
 | [/co restore](#co-restore) | Restore block data |
 | [/co purge](#co-purge) | Delete old block data |
+| [/co compact](#co-compact) | Pack old data into compressed storage |
 | [/co reload](#co-reload) | Reload the configuration file |
 | [/co status](#co-status) | View the plugin status |
 | [/co consumer](#co-consumer) | Toggle consumer processing |
@@ -98,6 +99,8 @@ Purge old block data. Useful for freeing up space on your HDD if you don't need 
 
 For example, `/co purge t:30d` will delete all data older than one month, and only keep the last 30 days of data.
 
+Rows are always deleted in place, in small batches. A purge never builds a second copy of the database, so it does not need free disk space equal to the size of your database in order to run.
+
 > If used in-game, only data older than 30 days can be purged.  
 > If used from the console, only data older than 24 hours can be purged.
 
@@ -113,13 +116,27 @@ For example, `/co purge t:30d i:stone,dirt` will delete all stone and dirt data 
 
 In CoreProtect v2.15+, adding `#optimize` to the end of the command (for example, `/co purge t:30d #optimize`) will also optimize supported database tables and reclaim unused disk space. How this option is handled depends on the database backend:
 
-* SQLite already rebuilds the database from retained data and reclaims unused file space as part of a manual purge, so `#optimize` is not needed.
+* SQLite deletes matching rows in batches and truncates its write-ahead log afterward. The freed pages stay in the database file and are reused by future logging, so the file does not shrink; `#optimize` has no additional effect.
 * MySQL normally deletes matching rows. Adding `#optimize` also optimizes its tables to reclaim unused space.
 * DuckDB deletes matching rows in one transaction and checkpoints afterward. `#optimize` has no additional effect.
 * ClickHouse drops fully covered monthly partitions for an unfiltered time purge and synchronously removes rows from partial or filtered partitions. Adding `#optimize` also runs `OPTIMIZE TABLE ... FINAL`.
 
 `#optimize` can significantly slow MySQL and ClickHouse purges and is generally unnecessary.
 
+___
+
+### /co compact
+Pack activity that has aged out of the hot window into compressed storage, without waiting for the nightly run.
+
+| Command | Parameters |
+| --- | --- |
+| /co compact | |
+
+Unlike the nightly run, this ignores `hot-window` and packs everything logged so far, including data from today. It uses the same safeguards: rows are sealed oldest first, one transaction per segment, and the database is never duplicated. Stopping the server or starting a purge mid-run simply leaves the remaining rows to be packed later.
+
+Compressed storage typically holds data at a small fraction of its live size, so a compact run frees most of the space the affected rows occupied. Data that is still inside the `hot-window` is left alone; if nothing is old enough, the command says so.
+
+SQLite only. See the [storage layout guide](/storage-layout/). Requires the `coreprotect.purge` permission.
 ___
 
 ### /co reload

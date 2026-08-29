@@ -4,12 +4,15 @@
   <artifactId>CoreProtect</artifactId>
   <version>24.0</version>
   <properties>
-    <project.branch></project.branch>
+    <!-- Identifies this build as the full CoreProtect edition rather than an unset development
+         build, which the plugin refuses to start without. Override with -Dproject.branch=... -->
+    <project.branch>coreprotect</project.branch>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <skipTests>true</skipTests>
     <maven.compiler.release>11</maven.compiler.release>
     <clickhouse.version>0.9.8</clickhouse.version>
     <duckdb.version>1.4.5.0</duckdb.version>
+    <zstd.version>1.5.7-6</zstd.version>
   </properties>
   <build>
     <resources>
@@ -80,6 +83,23 @@
                     <exclude>META-INF/services/**</exclude>
                   </excludes>
                 </filter>
+                <!-- Zstandard ships native libraries for every platform it supports; only the
+                     platforms Minecraft servers run on are bundled. -->
+                <filter>
+                  <artifact>com.github.luben:zstd-jni</artifact>
+                  <excludes>
+                    <exclude>aix/**</exclude>
+                    <exclude>freebsd/**</exclude>
+                    <exclude>linux/i386/**</exclude>
+                    <exclude>linux/loongarch64/**</exclude>
+                    <exclude>linux/mips64/**</exclude>
+                    <exclude>linux/ppc64/**</exclude>
+                    <exclude>linux/ppc64le/**</exclude>
+                    <exclude>linux/riscv64/**</exclude>
+                    <exclude>linux/s390x/**</exclude>
+                    <exclude>win/x86/**</exclude>
+                  </excludes>
+                </filter>
               </filters>
               <artifactSet>
                 <excludes>
@@ -92,10 +112,6 @@
                 </excludes>
               </artifactSet>
               <relocations>
-                <relocation>
-                  <pattern>org.bstats</pattern>
-                  <shadedPattern>net.coreprotect</shadedPattern>
-                </relocation>
                 <relocation>
                   <pattern>com.zaxxer</pattern>
                   <shadedPattern>net.coreprotect</shadedPattern>
@@ -223,12 +239,6 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
-      <groupId>org.bstats</groupId>
-      <artifactId>bstats-bukkit</artifactId>
-      <version>3.2.1</version>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
       <groupId>com.fastasyncworldedit</groupId>
       <artifactId>FastAsyncWorldEdit-Core</artifactId>
       <version>2.15.0</version>
@@ -250,6 +260,11 @@
       <groupId>com.zaxxer</groupId>
       <artifactId>HikariCP</artifactId>
       <version>7.0.2</version>
+    </dependency>
+    <dependency>
+      <groupId>com.github.luben</groupId>
+      <artifactId>zstd-jni</artifactId>
+      <version>${zstd.version}</version>
     </dependency>
     <dependency>
       <groupId>org.duckdb</groupId>

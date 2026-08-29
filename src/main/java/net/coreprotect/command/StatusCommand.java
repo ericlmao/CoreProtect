@@ -6,11 +6,16 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.PluginDescriptionFile;
 
+import java.sql.Connection;
+
 import net.coreprotect.CoreProtect;
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.consumer.Consumer;
 import net.coreprotect.consumer.process.Process;
+import net.coreprotect.database.ColdStorageStats;
+import net.coreprotect.database.LegacyImport;
+import net.coreprotect.database.Database;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
 import net.coreprotect.patch.Patch;
@@ -37,28 +42,8 @@ public class StatusCommand {
                     CoreProtect instance = CoreProtect.getInstance();
                     PluginDescriptionFile pdfFile = instance.getDescription();
 
-                    String versionCheck = "";
-                    if (Config.getGlobal().CHECK_UPDATES) {
-                        String latestVersion = NetworkHandler.latestVersion();
-                        String latestEdgeVersion = NetworkHandler.latestEdgeVersion();
-                        if (latestVersion != null) {
-                            versionCheck = " (" + Phrase.build(Phrase.LATEST_VERSION, "v" + latestVersion) + ")";
-                        }
-                        else if (latestEdgeVersion != null && !VersionUtils.isCommunityEdition()) {
-                            versionCheck = " (" + Phrase.build(Phrase.LATEST_VERSION, "v" + latestEdgeVersion) + ")";
-                        }
-                    }
-
-                    Chat.sendMessage(player, Color.WHITE + "----- " + Color.DARK_AQUA + "CoreProtect" + (VersionUtils.isCommunityEdition() ? " " + ConfigHandler.COMMUNITY_EDITION : "") + Color.WHITE + " -----");
-                    Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_VERSION, Color.WHITE, ConfigHandler.EDITION_NAME + " v" + pdfFile.getVersion() + ".") + versionCheck);
-
-                    String donationKey = NetworkHandler.donationKey();
-                    if (donationKey != null) {
-                        Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_LICENSE, Color.WHITE, Phrase.build(Phrase.VALID_DONATION_KEY)) + " (" + donationKey + ")");
-                    }
-                    else {
-                        Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_LICENSE, Color.WHITE, Phrase.build(Phrase.INVALID_DONATION_KEY)) + Color.GREY + Color.ITALIC + " (" + Phrase.build(Phrase.CHECK_CONFIG) + ")");
-                    }
+                    Chat.sendMessage(player, Color.WHITE + "----- " + Color.DARK_AQUA + "CoreProtect" + Color.WHITE + " -----");
+                    Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_VERSION, Color.WHITE, ConfigHandler.EDITION_NAME + " v" + pdfFile.getVersion() + "."));
 
                     /*
                         Items processed (since server start)
@@ -79,6 +64,8 @@ public class StatusCommand {
                         databaseName += " " + Color.RED + Phrase.build(Phrase.STATUS_DATABASE_STATE, Selector.SECOND) + Color.WHITE;
                     }
                     Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_DATABASE, Color.WHITE, databaseName) + firstVersion);
+
+                    sendStorageBreakdown(player);
 
                     if (ConfigHandler.worldeditEnabled) {
                         Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_INTEGRATION, Color.WHITE, "WorldEdit", Selector.FIRST));
@@ -161,8 +148,6 @@ public class StatusCommand {
                     // Functions.sendMessage(player, Color.DARK_AQUA + "Website: " + Color.WHITE + "www.coreprotect.net/updates/");
 
                     // Functions.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.LINK_DISCORD, Color.WHITE + "www.coreprotect.net/discord/").replaceFirst(":", ":" + Color.WHITE));
-                    Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.LINK_DISCORD, Color.WHITE, "www.coreprotect.net/discord/"));
-                    Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.LINK_PATREON, Color.WHITE, "www.patreon.com/coreprotect/"));
 
                     if (player.isOp() && alert.get(player.getName()) == null) {
                         alert.put(player.getName(), true);
@@ -186,4 +171,52 @@ public class StatusCommand {
         Thread thread = new Thread(runnable);
         thread.start();
     }
+    /**
+     * Reports how much of the database holds recent, fully indexed activity and how much holds
+     * compressed history. Only the SQLite storage keeps the two apart.
+     *
+     * @param player
+     *            the command sender to report to
+     */
+    private static void sendStorageBreakdown(CommandSender player) {
+        if (!ConfigHandler.databaseType.isSQLite()) {
+            return;
+        }
+
+        Connection connection = null;
+        try {
+            String importing = LegacyImport.getProgress();
+            if (importing != null) {
+                Chat.sendMessage(player, Color.DARK_AQUA + importing);
+            }
+
+            connection = Database.getConnection(true, 500);
+            if (connection == null) {
+                return;
+            }
+
+            ColdStorageStats stats = ColdStorageStats.read(connection);
+            if (stats == null) {
+                return;
+            }
+
+            Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_HOT_DATA, Color.WHITE, ColdStorageStats.format(stats.getHotBytes())));
+            Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_COLD_DATA, Color.WHITE, ColdStorageStats.format(stats.getColdBytes()),
+                    String.format("%,d", stats.getColdRows()), (stats.getColdRows() == 1 ? Selector.FIRST : Selector.SECOND)));
+        }
+        catch (Exception e) {
+            ErrorReporter.report(e);
+        }
+        finally {
+            if (connection != null) {
+                try {
+                    connection.close();
+                }
+                catch (Exception e) {
+                    ErrorReporter.report(e);
+                }
+            }
+        }
+    }
+
 }

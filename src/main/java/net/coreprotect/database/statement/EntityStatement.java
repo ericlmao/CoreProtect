@@ -27,6 +27,7 @@ import net.coreprotect.database.Database;
 import net.coreprotect.database.DatabaseType;
 import net.coreprotect.utility.DatabaseUtils;
 import net.coreprotect.utility.ErrorReporter;
+import net.coreprotect.utility.serialize.BlobCompression;
 import net.coreprotect.utility.serialize.EntityDataCodec;
 import net.coreprotect.utility.serialize.EntityDataCodec.Kind;
 
@@ -92,6 +93,9 @@ public class EntityStatement {
         if (databaseType.isColumnar()) {
             return EntityDataCodec.encode(kind, data);
         }
+        if (databaseType.isSQLite()) {
+            return BlobCompression.compress(EntityDataCodec.encode(kind, data));
+        }
         return serializeLegacyData(sanitizeData(data));
     }
 
@@ -99,7 +103,7 @@ public class EntityStatement {
         try (ByteArrayOutputStream output = new ByteArrayOutputStream(); BukkitObjectOutputStream objectOutput = new BukkitObjectOutputStream(output)) {
             objectOutput.writeObject(data);
             objectOutput.flush();
-            return output.toByteArray();
+            return BlobCompression.compress(output.toByteArray());
         }
     }
 
@@ -208,10 +212,11 @@ public class EntityStatement {
     }
 
     public static List<Object> readData(ResultSet resultSet, String column, Kind kind) throws SQLException {
-        return deserializeData(DatabaseUtils.getBytes(resultSet, column), kind);
+        return deserializeData(DatabaseUtils.getBlobBytes(resultSet, column), kind);
     }
 
-    private static List<Object> deserializeDataStrict(byte[] data, Kind kind) throws Exception {
+    private static List<Object> deserializeDataStrict(byte[] storedData, Kind kind) throws Exception {
+        byte[] data = BlobCompression.decompress(storedData);
         if (EntityDataCodec.isEncoded(data)) {
             return EntityDataCodec.decode(kind, data);
         }

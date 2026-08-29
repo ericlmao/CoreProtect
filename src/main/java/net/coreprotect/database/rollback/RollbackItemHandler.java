@@ -1,14 +1,13 @@
 package net.coreprotect.database.rollback;
 
-import java.io.ByteArrayInputStream;
 import java.util.List;
 
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
-import org.bukkit.util.io.BukkitObjectInputStream;
 
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.utility.ItemUtils;
 import net.coreprotect.utility.ErrorReporter;
 
 public class RollbackItemHandler {
@@ -25,11 +24,7 @@ public class RollbackItemHandler {
     public static Object[] populateItemStack(ItemStack itemstack, byte[] metadata) {
         if (metadata != null) {
             try {
-                ByteArrayInputStream metaByteStream = new ByteArrayInputStream(metadata);
-                BukkitObjectInputStream metaObjectStream = new BukkitObjectInputStream(metaByteStream);
-                Object metaList = metaObjectStream.readObject();
-                metaObjectStream.close();
-                metaByteStream.close();
+                Object metaList = ItemUtils.deserializeByteData(metadata);
 
                 return RollbackUtil.populateItemStack(itemstack, metaList);
             }
