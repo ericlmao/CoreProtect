@@ -147,6 +147,13 @@ public final class SQLiteSchema {
                 + "dict_id INTEGER PRIMARY KEY, table_id INTEGER NOT NULL, time INTEGER NOT NULL, sample_bytes INTEGER NOT NULL, "
                 + "data BLOB NOT NULL);");
 
+        // Blobs of consecutive rows, compressed together. Keyed by the row id the group begins at,
+        // which is worked out from a row id rather than looked up.
+        statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "blob_group ("
+                + "table_id INTEGER NOT NULL, first_rowid INTEGER NOT NULL, dict_id INTEGER NOT NULL, "
+                + "raw_size INTEGER NOT NULL, sizes BLOB NOT NULL, data BLOB NOT NULL, "
+                + "PRIMARY KEY (table_id, first_rowid)) WITHOUT ROWID;");
+
         statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "cold_flag ("
                 + "table_id INTEGER NOT NULL, rowid_ref INTEGER NOT NULL, rolled_back INTEGER NOT NULL, "
                 + "PRIMARY KEY (table_id, rowid_ref)) WITHOUT ROWID;");

@@ -59,8 +59,22 @@ Dictionaries are stored in the database next to the segment dictionaries and are
 blobs written before one existed, or against an earlier one, keep reading back. Each blob records
 which dictionary produced it.
 
+Better still, the blobs of neighbouring rows are compressed **together**, sixty four to a frame. A
+blob on its own is worth about thirty times; sixty four of them together are worth about seventy
+eight, because the compressor can see across rows as well as within them.
+
+Reading one row back then means unpacking the sixty four it sits with, which is only affordable
+because nothing has to be searched for. The group holding a row is `(rowid / 64) * 64`, which is also
+the group's key, so finding it is one seek; and the position of a blob inside the group is the sum of
+the lengths recorded before it. Both are arithmetic on numbers already in hand, and unpacking a group
+takes about six microseconds — less than fetching the row that asked for it.
+
+The newest rows are left alone. A group is only worth making once it is complete, so packing stops a
+group short of the end of the table and those rows are compressed one at a time until later runs
+overtake them.
+
 `/co compact` and the nightly maintenance run do this work, in batches, resuming where they left off
-if interrupted.
+if interrupted. Groups whose rows have all been removed by retention are dropped with them.
 
 ### Where this shows up in `/co status`
 

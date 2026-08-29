@@ -99,17 +99,10 @@ class BlobRecompressTest {
         BlobRecompressTask.run(connection, () -> {
         });
 
-        try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT rowid, data FROM co_entity ORDER BY rowid")) {
-            int seen = 0;
-            while (results.next()) {
-                long id = results.getLong(1);
-                byte[] restored = BlobCompression.decompress(results.getBytes(2));
-                assertArrayEquals(written.get(id), restored, "row " + id + " reads back as it was written");
-                seen++;
-            }
-            assertEquals(ROWS, seen, "every row was checked");
+        for (Map.Entry<Long, byte[]> entry : written.entrySet()) {
+            assertArrayEquals(entry.getValue(), blobFor(entry.getKey()), "row " + entry.getKey() + " reads back as it was written");
         }
+        assertEquals(ROWS, written.size(), "every row was checked");
     }
 
     @Test
@@ -203,12 +196,9 @@ class BlobRecompressTest {
         BlobRecompressTask.run(connection, () -> {
         });
 
-        try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT rowid, data FROM co_entity ORDER BY rowid")) {
-            while (results.next()) {
-                assertArrayEquals(written.get(results.getLong(1)), BlobCompression.decompress(results.getBytes(2)),
-                        "row " + results.getLong(1) + " survived being rewritten in two goes");
-            }
+        for (Map.Entry<Long, byte[]> entry : written.entrySet()) {
+            assertArrayEquals(entry.getValue(), blobFor(entry.getKey()),
+                    "row " + entry.getKey() + " survived being rewritten in two goes");
         }
         assertTrue(storedBytes() < partway, "the rest was rewritten on the second run");
     }
@@ -219,8 +209,9 @@ class BlobRecompressTest {
         });
 
         byte[] compressed;
+        // One of the newest rows, still too close to the end of the table to have been grouped.
         try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT data FROM co_entity WHERE rowid = 1")) {
+                ResultSet results = statement.executeQuery("SELECT data FROM co_entity WHERE data IS NOT NULL ORDER BY rowid DESC LIMIT 1")) {
             assertTrue(results.next());
             compressed = results.getBytes(1);
         }
@@ -254,12 +245,36 @@ class BlobRecompressTest {
         }
     }
 
+    /** Everything the blobs occupy, whether still on their rows or packed away into groups. */
     private long storedBytes() throws SQLException {
+        long total = 0;
         try (Statement statement = connection.createStatement();
                 ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data)),0) FROM co_entity")) {
             assertTrue(results.next());
-            return results.getLong(1);
+            total = results.getLong(1);
         }
+        try (Statement statement = connection.createStatement();
+                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data) + LENGTH(sizes)),0) FROM co_blob_group")) {
+            assertTrue(results.next());
+            total = total + results.getLong(1);
+        }
+        return total;
+    }
+
+    /** Reads a blob the way the plugin does: from the row if it is there, from its group if not. */
+    private byte[] blobFor(long rowId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT data FROM co_entity WHERE rowid = ?")) {
+            statement.setLong(1, rowId);
+            try (ResultSet results = statement.executeQuery()) {
+                if (results.next()) {
+                    byte[] stored = results.getBytes(1);
+                    if (stored != null && stored.length > 0) {
+                        return BlobCompression.decompress(stored);
+                    }
+                }
+            }
+        }
+        return ColdBlobStore.load(connection, "entity", rowId);
     }
 
     private long storedBytesUncompressed() {

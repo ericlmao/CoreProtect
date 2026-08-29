@@ -574,6 +574,7 @@ public class Database extends Queue {
         SQLiteColdIndex.invalidate();
         SegmentDictionary.clearCache();
         BlobDictionary.clear();
+        ColdBlobStore.clearCache();
         if (ConfigHandler.sqliteDataSource != null) {
             try {
                 ConfigHandler.sqliteDataSource.close();
