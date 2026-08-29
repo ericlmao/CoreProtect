@@ -4,6 +4,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.text.NumberFormat;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.bukkit.command.CommandSender;
 
@@ -64,6 +65,44 @@ public class CompactCommand {
     /** When the next progress line is due, so a long run says something without saying it constantly. */
     private static long nextProgress;
 
+    /**
+     * Reports how far along the compact is, on its own thread.
+     *
+     * <p>
+     * It was reported from the check each phase makes between pieces of work, which only says
+     * anything while a phase is making those checks. Several do not: emptying the write ahead log,
+     * reading the index of compressed storage and learning how the data compresses are each a single
+     * long call. A compact that went quiet in one of those looked identical to one that had hung.
+     * Reporting on its own thread says something whatever the work is doing, and naming the phase
+     * before it starts means a silent phase still says which one it is.
+     * </p>
+     *
+     * @param player
+     *            whoever asked for the compact
+     * @param running
+     *            cleared when the compact is over
+     * @return the thread, already started
+     */
+    private static Thread startReporting(CommandSender player, AtomicBoolean running) {
+        Thread reporter = new Thread(() -> {
+            try {
+                while (running.get()) {
+                    Thread.sleep(PROGRESS_INTERVAL * 1000L);
+                    String progress = CompactProgress.line();
+                    if (running.get() && progress != null) {
+                        Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_PROGRESS, progress));
+                    }
+                }
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        }, "CoreProtect-Compact-Progress");
+        reporter.setDaemon(true);
+        reporter.start();
+        return reporter;
+    }
+
     private static void compact(CommandSender player) {
         Consumer.OperationStartResult startResult = Consumer.claimBackgroundPurge();
         if (startResult != Consumer.OperationStartResult.STARTED) {
@@ -72,9 +111,13 @@ public class CompactCommand {
         }
 
         Connection connection = null;
+        AtomicBoolean running = null;
+        Thread reporter = null;
         try {
             Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_STARTED));
-            nextProgress = (System.currentTimeMillis() / 1000L) + PROGRESS_INTERVAL;
+            CompactProgress.set("starting", 0, 0);
+            running = new AtomicBoolean(true);
+            reporter = startReporting(player, running);
 
             for (int attempt = 0; attempt < 6 && connection == null; attempt++) {
                 connection = Database.getConnection(false, 500);
@@ -92,16 +135,19 @@ public class CompactCommand {
             // for the hot window to expire.
             // Anything an earlier build left numbered underneath the segments is put back above them
             // first, or it can never be sealed.
+            CompactProgress.set("reading compressed storage", 0, 0);
             ColdRollupTask.repairRowIds(connection, () -> tick(player));
 
             long sealBefore = (System.currentTimeMillis() / 1000L) + 1;
             long sealed = ColdRollupTask.rollUp(connection, () -> tick(player), sealBefore);
             // Segments written by older builds have no per player counts, which lookups rely on to
             // avoid opening segments that hold nothing for the player being searched for.
+            CompactProgress.set("checking compressed storage", 0, 0);
             ColdRollupTask.backfillStatistics(connection, () -> tick(player));
             // Entity data is read one row at a time and so never reaches a segment. It is compressed
             // where it lies instead, against a dictionary that supplies the repetition a single blob
             // of a couple of kilobytes does not contain.
+            CompactProgress.set("compressing entity data", 0, 0);
             long blobBytes = BlobRecompressTask.run(connection, () -> tick(player));
             reclaimSpace(connection, player);
 
@@ -131,6 +177,13 @@ public class CompactCommand {
                     ErrorReporter.report(e);
                 }
             }
+            if (running != null) {
+                running.set(false);
+            }
+            if (reporter != null) {
+                reporter.interrupt();
+            }
+            CompactProgress.clear();
             Consumer.releaseBackgroundPurge();
         }
     }
@@ -146,7 +199,9 @@ public class CompactCommand {
      */
     private static void reclaimSpace(Connection connection, CommandSender player) {
         try {
+            CompactProgress.set("returning freed space", 0, 0);
             Database.reclaimFreePages(connection, () -> tick(player));
+            CompactProgress.set("emptying the write ahead log", 0, 0);
             try (Statement statement = connection.createStatement()) {
                 statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
             }
