@@ -80,8 +80,9 @@ class InspectorSourceTest {
         write(600, X, Z);
         seal();
 
-        // Everything has been packed away, which is exactly when the inspector used to go blind.
-        assertEquals(0, countLive(), "the live table no longer holds the rows");
+        // All but the newest row has been packed away, which is exactly when the inspector used to go
+        // blind. The one left behind is what keeps the table numbering above the segments.
+        assertEquals(1, countLive(), "only the newest row is left in the live table");
 
         try (InspectorSource source = InspectorSource.open(connection, "block", WORLD, X, X, Z, Z, 0)) {
             assertTrue(source.table().startsWith("("), "the source reads from the live rows and the segments together");

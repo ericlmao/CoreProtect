@@ -15,6 +15,7 @@ import java.util.Set;
 
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.utility.Chat;
 
 /**
  * Moves activity older than the hot window out of the live tables and into compressed cold
@@ -286,11 +287,19 @@ public final class ColdRollupTask {
         long trainingBytes = 0;
         int dictionaryId = SegmentDictionary.currentDictionary(connection, tableId);
 
+        // The newest row is never sealed, so the live table never empties. SQLite gives a new row the
+        // highest row id in the table plus one, and it only knows about the rows still there: empty
+        // the table and the next row written starts again at one, on top of row ids the segments are
+        // already using. Everything here relies on a segment's row ids being below the live table's,
+        // so one row is left behind to hold the numbering up. It is sealed by a later run, once newer
+        // rows have taken its place.
+        long ceiling = Math.min(maxRowId, liveMaximumRowId(connection, table) - 1);
+
         while (true) {
             callback.beforeSegment();
 
             long highWater = SQLiteColdIndex.coldHighWaterMark(table);
-            Block block = readBlock(connection, table, layout, highWater, sealBefore, maxRowId);
+            Block block = readBlock(connection, table, layout, highWater, sealBefore, ceiling);
             if (block == null || block.rowIds.isEmpty()) {
                 break;
             }
@@ -424,6 +433,79 @@ public final class ColdRollupTask {
         private long maxTime = Long.MIN_VALUE;
         private long minRowId = Long.MAX_VALUE;
         private long maxRowId = Long.MIN_VALUE;
+    }
+
+    /**
+     * @return the highest row id the live table holds, or 0 when it holds nothing
+     */
+    private static long liveMaximumRowId(Connection connection, String table) throws SQLException {
+        try (Statement statement = connection.createStatement();
+                ResultSet results = statement.executeQuery("SELECT COALESCE(MAX(rowid),0) FROM " + ConfigHandler.prefix + table)) {
+            return results.next() ? results.getLong(1) : 0;
+        }
+    }
+
+    /**
+     * Moves live rows back above the segments when their row ids have run into them.
+     *
+     * <p>
+     * A table that was emptied by an earlier build started numbering again from one, over row ids its
+     * segments already hold. Those rows can never be sealed, because sealing only ever looks above
+     * the highest row id already sealed, and while they are there a lookup reading the live rows and
+     * the segments together sees two different rows under one number. Moving them above everything
+     * restores the order the rest of the design depends on.
+     * </p>
+     *
+     * @param connection
+     *            an open connection
+     * @param callback
+     *            invoked per table; throwing stops the repair
+     * @return the number of rows moved
+     * @throws Exception
+     *             if the rows cannot be moved
+     */
+    public static long repairRowIds(Connection connection, Callback callback) throws Exception {
+        // Which row ids the segments hold is read from the index, and the index is empty until it has
+        // been read from the database. Without this the repair sees no segments, decides there is
+        // nothing underneath them, and quietly does nothing.
+        SQLiteColdIndex.reload(connection);
+
+        long moved = 0;
+        for (String table : SQLiteColdIndex.getSegmentedTables()) {
+            callback.beforeSegment();
+
+            long highWater = SQLiteColdIndex.coldHighWaterMark(table);
+            if (highWater == 0) {
+                continue;
+            }
+
+            long lowest;
+            long highest;
+            try (Statement statement = connection.createStatement();
+                    ResultSet results = statement.executeQuery("SELECT COALESCE(MIN(rowid),0), COALESCE(MAX(rowid),0) FROM " + ConfigHandler.prefix + table)) {
+                results.next();
+                lowest = results.getLong(1);
+                highest = results.getLong(2);
+            }
+            if (lowest == 0 || lowest > highWater) {
+                continue;
+            }
+
+            // Above the segments and above anything the table already holds, so nothing is moved onto
+            // a row id that is in use.
+            long offset = Math.max(highWater, highest) - lowest + 1;
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE " + ConfigHandler.prefix + table + " SET rowid = rowid + ? WHERE rowid <= ?")) {
+                statement.setLong(1, offset);
+                statement.setLong(2, highWater);
+                int updated = statement.executeUpdate();
+                moved = moved + updated;
+                if (updated > 0) {
+                    Chat.console("Moved " + updated + " rows of " + table + " above compressed storage, where their numbering had run into it.");
+                }
+            }
+        }
+        return moved;
     }
 
     private static Block readBlock(Connection connection, String table, SQLiteColdIndex.TableLayout layout, long afterRowId, long sealBefore, long maxRowId) throws SQLException {

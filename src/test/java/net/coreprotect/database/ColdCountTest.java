@@ -145,11 +145,34 @@ class ColdCountTest {
         try {
             SQLiteColdIndex.setLookupFilters(users, types);
             SQLiteColdIndex.setCounting(true);
-            SQLiteColdIndex.sourceExpression(connection, "block", 0, null);
-            return SQLiteColdIndex.countedRows("block");
+            String source = SQLiteColdIndex.sourceExpression(connection, "block", 0, null);
+            // What a lookup actually reports: the rows the segments counted, plus the live rows
+            // counted by the query. Sealing leaves the newest row behind, so leaving the live side out
+            // would compare the segments alone against a reading of both.
+            return countRows(source, users, types, startTime, endTime) + SQLiteColdIndex.countedRows("block");
         }
         finally {
             SQLiteColdIndex.endLookup(connection);
+        }
+    }
+
+    /** Counts the rows of a source that match the same restrictions. */
+    private long countRows(String source, String users, String types, long startTime, long endTime) throws Exception {
+        StringBuilder query = new StringBuilder("SELECT COUNT(*) FROM " + source + " WHERE 1");
+        if (!users.isEmpty()) {
+            query.append(" AND user IN(").append(users).append(')');
+        }
+        if (!types.isEmpty()) {
+            query.append(" AND type IN(").append(types).append(')');
+        }
+        if (startTime > 0) {
+            query.append(" AND time > ").append(startTime);
+        }
+        if (endTime > 0) {
+            query.append(" AND time <= ").append(endTime);
+        }
+        try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery(query.toString())) {
+            return results.next() ? results.getLong(1) : 0;
         }
     }
 

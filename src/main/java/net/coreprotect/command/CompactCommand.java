@@ -82,6 +82,10 @@ public class CompactCommand {
 
             // A manual compact packs everything that has already been written, rather than waiting
             // for the hot window to expire.
+            // Anything an earlier build left numbered underneath the segments is put back above them
+            // first, or it can never be sealed.
+            ColdRollupTask.repairRowIds(connection, CompactCommand::checkCancelled);
+
             long sealBefore = (System.currentTimeMillis() / 1000L) + 1;
             long sealed = ColdRollupTask.rollUp(connection, CompactCommand::checkCancelled, sealBefore);
             // Segments written by older builds have no per player counts, which lookups rely on to

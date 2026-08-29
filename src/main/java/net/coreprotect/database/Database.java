@@ -343,6 +343,29 @@ public class Database extends Queue {
      *             if the pages cannot be returned
      */
     public static void reclaimFreePages(Connection connection, ColdRollupTask.Callback stop) throws SQLException {
+        reclaimFreePages(connection, stop, Long.MAX_VALUE);
+    }
+
+    /**
+     * Hands back freed pages, up to a limit.
+     *
+     * <p>
+     * A limit is what lets this be called while a long job is still running. Freed pages are not
+     * reusable until they are handed back, so a job that frees tens of gigabytes and only tidies up
+     * at the end grows the file by everything it freed before shrinking it again. Handing some back
+     * as it goes keeps the file near the size the data actually needs.
+     * </p>
+     *
+     * @param connection
+     *            an open connection
+     * @param stop
+     *            consulted between batches, or null to run to completion
+     * @param maximumPages
+     *            the most pages to hand back before returning
+     * @throws SQLException
+     *             if the pages cannot be returned
+     */
+    public static void reclaimFreePages(Connection connection, ColdRollupTask.Callback stop, long maximumPages) throws SQLException {
         boolean autoCommit = connection.getAutoCommit();
         if (!autoCommit) {
             connection.commit();
@@ -360,10 +383,13 @@ public class Database extends Queue {
             // between them and logging carries on.
             long previous = Long.MAX_VALUE;
             long free = freePages(statement);
-            while (free > 0 && free < previous) {
-                statement.executeUpdate("PRAGMA incremental_vacuum(" + Math.min(free, RECLAIM_PAGES) + ")");
+            long returned = 0;
+            while (free > 0 && free < previous && returned < maximumPages) {
+                long batch = Math.min(Math.min(free, RECLAIM_PAGES), maximumPages - returned);
+                statement.executeUpdate("PRAGMA incremental_vacuum(" + batch + ")");
                 previous = free;
                 free = freePages(statement);
+                returned = returned + batch;
                 if (stop != null) {
                     try {
                         stop.beforeSegment();

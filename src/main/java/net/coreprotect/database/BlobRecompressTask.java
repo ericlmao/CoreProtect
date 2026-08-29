@@ -54,6 +54,15 @@ public final class BlobRecompressTask {
     /** Groups packed per transaction. */
     private static final int GROUPS_PER_BATCH = 32;
 
+    /** Batches between handing freed pages back, so the file does not grow by all of them first. */
+    private static final int BATCHES_PER_RECLAIM = 16;
+
+    /** Pages handed back each time, comfortably more than a run of batches frees. */
+    private static final long RECLAIM_BUDGET = 65536;
+
+    /** The longest pause taken between batches to let anything else waiting to write get in. */
+    private static final long MAXIMUM_PAUSE_MILLISECONDS = 50;
+
     /** Blobs read to train a dictionary. At a couple of kilobytes each this is ample material. */
     private static final int SAMPLE_ROWS = 4096;
 
@@ -183,6 +192,26 @@ public final class BlobRecompressTask {
     }
 
     /**
+     * Waits a moment before taking the write lock again.
+     *
+     * <p>
+     * Whoever holds it releases it and asks for it back immediately, and SQLite does not hand it out
+     * in turn: a writer that is waiting sleeps, wakes to find it taken again, and can go on missing
+     * it until it gives up. Standing back for a fraction of the time the last batch took leaves a
+     * window wide enough for anything else to get in, and costs a fraction of the run.
+     * </p>
+     *
+     * @param batchMilliseconds
+     *            how long the batch just finished took
+     */
+    private static void pause(long batchMilliseconds) throws InterruptedException {
+        long wait = Math.min(batchMilliseconds / 4, MAXIMUM_PAUSE_MILLISECONDS);
+        if (wait > 0) {
+            Thread.sleep(wait);
+        }
+    }
+
+    /**
      * Removes groups whose rows have all been purged.
      *
      * <p>
@@ -239,10 +268,12 @@ public final class BlobRecompressTask {
         // A whole group short of the end, so a group is never made from rows that are still arriving.
         long limit = ColdBlobStore.groupOf(Math.max(0, highest - ColdBlobStore.GROUP_ROWS));
         long saved = 0;
+        int batches = 0;
 
         while (frontier < limit) {
             callback.beforeSegment();
 
+            long started = System.currentTimeMillis();
             long batchEnd = Math.min(frontier + (ColdBlobStore.GROUP_ROWS * GROUPS_PER_BATCH), limit);
             long batchSaved = packRange(connection, table, tableId, columns, dictionaryId, frontier, batchEnd);
             saved = saved + batchSaved;
@@ -251,6 +282,11 @@ public final class BlobRecompressTask {
             if (batchSaved > 0) {
                 recordSaving(connection, batchSaved);
             }
+
+            if (++batches % BATCHES_PER_RECLAIM == 0) {
+                Database.reclaimFreePages(connection, callback, RECLAIM_BUDGET);
+            }
+            pause(System.currentTimeMillis() - started);
         }
 
         return saved;
@@ -396,6 +432,7 @@ public final class BlobRecompressTask {
         while (frontier < highest) {
             callback.beforeSegment();
 
+            long started = System.currentTimeMillis();
             long batchEnd = Math.min(frontier + BATCH_ROWS, highest);
             long batchSaved = recompressRange(connection, table, columns, frontier, batchEnd);
             saved = saved + batchSaved;
@@ -406,6 +443,7 @@ public final class BlobRecompressTask {
             if (batchSaved > 0) {
                 recordSaving(connection, batchSaved);
             }
+            pause(System.currentTimeMillis() - started);
         }
 
         return saved;
