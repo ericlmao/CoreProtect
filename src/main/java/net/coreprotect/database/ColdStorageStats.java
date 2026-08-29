@@ -24,12 +24,14 @@ public final class ColdStorageStats {
     private final long coldBytes;
     private final long freeBytes;
     private final long coldRows;
+    private final long blobSavedBytes;
 
-    private ColdStorageStats(long hotBytes, long coldBytes, long freeBytes, long coldRows) {
+    private ColdStorageStats(long hotBytes, long coldBytes, long freeBytes, long coldRows, long blobSavedBytes) {
         this.hotBytes = hotBytes;
         this.coldBytes = coldBytes;
         this.freeBytes = freeBytes;
         this.coldRows = coldRows;
+        this.blobSavedBytes = blobSavedBytes;
     }
 
     /**
@@ -58,6 +60,17 @@ public final class ColdStorageStats {
      */
     public long getColdRows() {
         return coldRows;
+    }
+
+    /**
+     * The live tables hold entity data as one compressed blob per row, because it is read a row at a
+     * time and so never becomes a segment. That compression shows up as the live size going down
+     * rather than the compressed size going up, which on its own looks like data going missing.
+     *
+     * @return the bytes compressing those blobs has saved
+     */
+    public long getBlobSavedBytes() {
+        return blobSavedBytes;
     }
 
     /**
@@ -94,7 +107,7 @@ public final class ColdStorageStats {
             long totalBytes = pageCount * pageSize;
             long freeBytes = freeList * pageSize;
             long hotBytes = Math.max(0, totalBytes - coldBytes - freeBytes);
-            return new ColdStorageStats(hotBytes, coldBytes, freeBytes, coldRows);
+            return new ColdStorageStats(hotBytes, coldBytes, freeBytes, coldRows, BlobRecompressTask.savedBytes(connection));
         }
     }
 

@@ -203,6 +203,9 @@ public class StatusCommand {
             Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_HOT_DATA, Color.WHITE, ColdStorageStats.format(stats.getHotBytes())));
             Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_COLD_DATA, Color.WHITE, ColdStorageStats.format(stats.getColdBytes()),
                     String.format("%,d", stats.getColdRows()), (stats.getColdRows() == 1 ? Selector.FIRST : Selector.SECOND)));
+            if (stats.getBlobSavedBytes() > 0) {
+                Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_ENTITY_DATA, Color.WHITE, ColdStorageStats.format(stats.getBlobSavedBytes())));
+            }
         }
         catch (Exception e) {
             ErrorReporter.report(e);

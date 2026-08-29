@@ -42,11 +42,44 @@ Compression normally happens during the nightly automatic purge. To pack older d
 
 Unlike the nightly run, `/co compact` ignores `hot-window` entirely and packs everything logged up to that moment, including data from today. It reports how many rows were packed and returns the freed pages to the file system afterwards. Newly logged data goes back into the live tables as usual, so the hot window still governs everything written after the compact.
 
+## Entity data
+
+Most tables are packed into segments once they age out of the hot window. Entity data is the
+exception. A lookup fetches it a row at a time by row id, from anywhere in the table, so it has to
+stay somewhere a single row can be read on its own — unpacking a segment of tens of thousands of
+rows to display one entity would be far worse than the space it saves.
+
+It is compressed in place instead. Each blob is only a couple of kilobytes, and what repeats in this
+data repeats between rows rather than within any one of them: the same entity types, the same
+attribute names, the same class descriptions, over and over. Compressed on its own such a blob
+shrinks by about a third. Compressed against a dictionary trained on a sample of the same server's
+data, the same blobs shrink to about a thirtieth, and each one stays independently readable.
+
+Dictionaries are stored in the database next to the segment dictionaries and are never removed, so
+blobs written before one existed, or against an earlier one, keep reading back. Each blob records
+which dictionary produced it.
+
+`/co compact` and the nightly maintenance run do this work, in batches, resuming where they left off
+if interrupted.
+
+### Where this shows up in `/co status`
+
+Entity data lives in the live tables, so compressing it makes **Hot Data** fall while **Cold Data**
+stays where it is — cold means segments, and entity rows never become segments. So that a falling
+hot size is not mistaken for data going missing, `/co status` also reports what the compression has
+saved:
+
+```text
+Hot Data: 2.10 GB (recent activity, fully indexed).
+Cold Data: 212.0 MB (132,294,578 rows compressed).
+Entity Data: compressed in place, saving 51.0 GB.
+```
+
 ## Limits
 
 * This layout is SQLite only. DuckDB and ClickHouse compress their own storage; MySQL is unchanged.
 * A purge limited to one world or to specific block types only covers data still in the live tables, since removing part of a segment would mean rewriting it.
-* Live entity data (`entity_spawn`) is never compressed. It is a registry of current entities rather than a log, and it is updated at any age.
+* Entity data is never packed into a segment. It is read one row at a time by row id, so it stays in the live tables where a single row can be fetched without unpacking anything else; it is compressed where it lies instead, as described above.
 
 ## Upgrading an existing database
 

@@ -272,6 +272,7 @@ public class Language {
         phrases.put(Phrase.STATUS_CONSUMER, "Consumer: {0} {item|items} in queue.");
         phrases.put(Phrase.STATUS_DATABASE, "Database: Using {0}.");
         phrases.put(Phrase.STATUS_DATABASE_STATE, "({writes halted|unreachable})");
+        phrases.put(Phrase.STATUS_ENTITY_DATA, "Entity Data: compressed in place, saving {0}.");
         phrases.put(Phrase.STATUS_HOT_DATA, "Hot Data: {0} (recent activity, fully indexed).");
         phrases.put(Phrase.STATUS_INTEGRATION, "{0}: Integration {enabled|disabled}.");
         phrases.put(Phrase.STATUS_LICENSE, "License: {0}");

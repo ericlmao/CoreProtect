@@ -145,6 +145,36 @@ class BlobRecompressTest {
     }
 
     @Test
+    void theSavingIsReportedSoTheShrinkIsNotMistakenForDataLoss() throws Exception {
+        // Entity data stays in the live tables, so compressing it makes the hot size fall while the
+        // cold size stays put. Without a figure for it that reads like rows going missing.
+        long saved = BlobRecompressTask.run(connection, () -> {
+        });
+
+        ColdStorageStats stats = ColdStorageStats.read(connection);
+        assertNotNull(stats);
+        assertEquals(saved, stats.getBlobSavedBytes(), "the saving is reported for the status command");
+        assertTrue(stats.getBlobSavedBytes() > 0, "and it is not nothing");
+    }
+
+    @Test
+    void theSavingAddsUpAcrossRuns() throws Exception {
+        int[] batches = { 0 };
+        assertThrows(InterruptedException.class, () -> BlobRecompressTask.run(connection, () -> {
+            if (batches[0]++ == 2) {
+                throw new InterruptedException("stopped");
+            }
+        }));
+        long first = ColdStorageStats.read(connection).getBlobSavedBytes();
+        assertTrue(first > 0, "the interrupted run recorded what it managed");
+
+        BlobRecompressTask.run(connection, () -> {
+        });
+
+        assertTrue(ColdStorageStats.read(connection).getBlobSavedBytes() > first, "the rest is added to it, not replacing it");
+    }
+
+    @Test
     void runningItAgainDoesNothingMore() throws Exception {
         BlobRecompressTask.run(connection, () -> {
         });

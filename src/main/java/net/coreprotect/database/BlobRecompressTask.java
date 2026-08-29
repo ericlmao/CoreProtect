@@ -52,6 +52,9 @@ public final class BlobRecompressTask {
     /** Blobs read to train a dictionary. At a couple of kilobytes each this is ample material. */
     private static final int SAMPLE_ROWS = 4096;
 
+    /** Where the running total of bytes saved by compressing blobs is kept. */
+    private static final String SAVED_MARKER = "blobs_saved_bytes";
+
     /** Tables holding a blob per row that is read by row id rather than scanned. */
     private static final List<String> TABLES = Arrays.asList("entity", "entity_spawn");
 
@@ -159,7 +162,7 @@ public final class BlobRecompressTask {
             // A new dictionary means every blob written against the previous one is worth rewriting,
             // so the record of how far each table has been taken starts again.
             try (Statement statement = connection.createStatement()) {
-                statement.executeUpdate("DELETE FROM " + ConfigHandler.prefix + "schema WHERE name LIKE 'blobs\\_%' ESCAPE '\\'");
+                statement.executeUpdate("DELETE FROM " + ConfigHandler.prefix + "schema WHERE name LIKE 'blobs\\_%\\_rowid' ESCAPE '\\'");
             }
         }
     }
@@ -185,9 +188,15 @@ public final class BlobRecompressTask {
             callback.beforeSegment();
 
             long batchEnd = Math.min(frontier + BATCH_ROWS, highest);
-            saved = saved + recompressRange(connection, table, columns, frontier, batchEnd);
+            long batchSaved = recompressRange(connection, table, columns, frontier, batchEnd);
+            saved = saved + batchSaved;
             frontier = batchEnd;
             writeMarker(connection, marker, Long.toString(frontier));
+            // Recorded as it is earned rather than at the end, so a run that is stopped part way
+            // still accounts for the rows it did compress.
+            if (batchSaved > 0) {
+                recordSaving(connection, batchSaved);
+            }
         }
 
         return saved;
@@ -380,6 +389,50 @@ public final class BlobRecompressTask {
         try (Statement statement = connection.createStatement();
                 ResultSet results = statement.executeQuery("SELECT COALESCE(MAX(rowid),0) FROM " + ConfigHandler.prefix + table)) {
             return results.next() ? results.getLong(1) : 0;
+        }
+    }
+
+    /**
+     * Adds to the running total of what compressing these blobs has saved.
+     *
+     * <p>
+     * The live tables cannot be measured cheaply enough to do it on demand, and a lookup asking how
+     * much space entity data takes would have to read every row of it. The total is kept as it is
+     * earned instead, so {@code /co status} can say that the live side shrank because the data was
+     * compressed rather than because any of it went missing.
+     * </p>
+     */
+    private static void recordSaving(Connection connection, long saved) throws SQLException {
+        String recorded = readMarker(connection, SAVED_MARKER);
+        long total = saved;
+        if (recorded != null) {
+            try {
+                total = total + Long.parseLong(recorded);
+            }
+            catch (NumberFormatException exception) {
+                // A total that cannot be read starts again from this run.
+            }
+        }
+        writeMarker(connection, SAVED_MARKER, Long.toString(total));
+    }
+
+    /**
+     * @param connection
+     *            an open connection
+     * @return the bytes compressing the live tables' blobs has saved so far
+     * @throws SQLException
+     *             if the total cannot be read
+     */
+    public static long savedBytes(Connection connection) throws SQLException {
+        String recorded = readMarker(connection, SAVED_MARKER);
+        if (recorded == null) {
+            return 0;
+        }
+        try {
+            return Long.parseLong(recorded);
+        }
+        catch (NumberFormatException exception) {
+            return 0;
         }
     }
 
