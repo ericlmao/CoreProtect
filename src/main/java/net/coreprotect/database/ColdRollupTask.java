@@ -31,6 +31,12 @@ import net.coreprotect.utility.Chat;
  */
 public final class ColdRollupTask {
 
+    /**
+     * Segments read ahead of the one being written, so that several can be encoded and compressed at
+     * once. Held down because a segment's rows are in memory until it is written.
+     */
+    private static final int READ_AHEAD_SEGMENTS = 4;
+
     /** Rows per segment. Small enough to decode quickly, large enough to compress well. */
     static final int SEGMENT_ROWS = 65536;
 
@@ -297,37 +303,94 @@ public final class ColdRollupTask {
         // rows have taken its place.
         long ceiling = Math.min(maxRowId, liveMaximumRowId(connection, table) - 1);
 
+        // Where reading has reached, kept here rather than asked of the index each time round, so
+        // that the next segments can be read while the last ones are still being encoded.
+        long cursor = SQLiteColdIndex.coldHighWaterMark(table);
+
         while (true) {
             callback.beforeSegment();
 
-            long highWater = SQLiteColdIndex.coldHighWaterMark(table);
-            Block block = readBlock(connection, table, layout, highWater, sealBefore, ceiling);
-            if (block == null || block.rowIds.isEmpty()) {
+            // Until a dictionary has been trained the segments have to be encoded one at a time,
+            // since each one contributes to what the dictionary is trained on and the ones after it
+            // are compressed against the result.
+            int depth = dictionaryId == 0 ? 1 : Math.min(CompactWorkers.threads(), READ_AHEAD_SEGMENTS);
+            List<Block> blocks = new ArrayList<>(depth);
+            for (int index = 0; index < depth; index++) {
+                Block block = readBlock(connection, table, layout, cursor, sealBefore, ceiling);
+                if (block == null || block.rowIds.isEmpty()) {
+                    break;
+                }
+                cursor = block.maxRowId;
+                blocks.add(block);
+            }
+
+            if (blocks.isEmpty()) {
                 break;
             }
 
-            ColdSegmentCodec.Frames frames = ColdSegmentCodec.encode(layout.types, toArray(block.rowIds), block.rows);
-
-            if (dictionaryId == 0 && trainingBytes < TRAINING_TARGET_BYTES && frames.getPayload().length > 0) {
-                trainingSamples.addAll(ColdSegmentCodec.payloadSamples(frames.getScalars(), frames.getPayload()));
-                trainingBytes = trainingBytes + frames.getPayload().length;
-                if (trainingBytes >= TRAINING_TARGET_BYTES) {
-                    dictionaryId = SegmentDictionary.train(connection, tableId, trainingSamples);
-                    trainingSamples.clear();
+            if (dictionaryId == 0 && trainingBytes < TRAINING_TARGET_BYTES) {
+                Block block = blocks.get(0);
+                ColdSegmentCodec.Frames frames = ColdSegmentCodec.encode(layout.types, toArray(block.rowIds), block.rows);
+                if (frames.getPayload().length > 0) {
+                    trainingSamples.addAll(ColdSegmentCodec.payloadSamples(frames.getScalars(), frames.getPayload()));
+                    trainingBytes = trainingBytes + frames.getPayload().length;
+                    if (trainingBytes >= TRAINING_TARGET_BYTES) {
+                        dictionaryId = SegmentDictionary.train(connection, tableId, trainingSamples);
+                        trainingSamples.clear();
+                    }
                 }
             }
 
-            byte[] scalarFrame = SegmentDictionary.compress(frames.getScalars(), 0, connection);
-            byte[] payloadFrame = frames.getPayload().length == 0 ? null : SegmentDictionary.compress(frames.getPayload(), dictionaryId, connection);
+            // Encoding, checking and compressing a segment is the slow part of sealing and touches
+            // nothing but the rows it was handed, so the segments in hand are prepared on as many
+            // cores as are spare. They are written afterwards, in order, on this thread, because the
+            // database takes one writer and their row ids have to stay in order.
+            SegmentDictionary.warm(dictionaryId, connection);
+            int dictionary = dictionaryId;
+            List<Sealed> prepared;
+            try {
+                prepared = CompactWorkers.map(blocks, block -> {
+                    ColdSegmentCodec.Frames frames = ColdSegmentCodec.encode(layout.types, toArray(block.rowIds), block.rows);
+                    verify(frames, layout, block);
+                    byte[] scalars = SegmentDictionary.compressWith(frames.getScalars(), 0);
+                    byte[] payload = frames.getPayload().length == 0 ? null : SegmentDictionary.compressWith(frames.getPayload(), dictionary);
+                    return new Sealed(block, frames, scalars, payload);
+                });
+            }
+            catch (SQLException failure) {
+                throw failure;
+            }
+            catch (RuntimeException failure) {
+                throw failure;
+            }
+            catch (Exception failure) {
+                throw new SQLException(failure);
+            }
 
-            verify(frames, layout, block);
-            writeSegment(connection, tableId, table, block, layout, frames, scalarFrame, payloadFrame, dictionaryId);
+            for (Sealed segment : prepared) {
+                writeSegment(connection, tableId, table, segment.block, layout, segment.frames, segment.scalars, segment.payload, dictionaryId);
+                sealed = sealed + segment.block.rowIds.size();
+                CompactProgress.set("packing " + table + " into compressed storage", sealed, 0);
+            }
             SQLiteColdIndex.reload(connection);
-            sealed = sealed + block.rowIds.size();
-            CompactProgress.set("packing " + table + " into compressed storage", sealed, 0);
         }
 
         return sealed;
+    }
+
+    /** A segment that has been encoded, checked and compressed, and is waiting to be written. */
+    private static final class Sealed {
+        private final Block block;
+        private final ColdSegmentCodec.Frames frames;
+        private final byte[] scalars;
+        private final byte[] payload;
+
+        private Sealed(Block block, ColdSegmentCodec.Frames frames, byte[] scalars, byte[] payload) {
+            this.block = block;
+            this.frames = frames;
+            this.scalars = scalars;
+            this.payload = payload;
+        }
     }
 
     /**

@@ -387,22 +387,36 @@ public class Database extends Queue {
             long outstanding = free;
             long returned = 0;
             long begun = System.currentTimeMillis();
+            long batch = RECLAIM_FIRST_PAGES;
+
+            // Said before the first page moves rather than after it. How long a call takes depends on
+            // how much live data has to be moved out of the end of the file to make the truncation
+            // possible, and on a database that is nearly all free space with its rows scattered
+            // through it that can be minutes. Waiting for a call to finish before saying anything
+            // leaves the operator watching a line that never changes.
+            report(outstanding, free, pageSize, begun);
+
             while (free > 0 && free < previous && returned < maximumPages) {
-                long batch = Math.min(Math.min(free, RECLAIM_PAGES), maximumPages - returned);
+                long asked = Math.min(Math.min(free, batch), maximumPages - returned);
                 long started = System.currentTimeMillis();
-                statement.executeUpdate("PRAGMA incremental_vacuum(" + batch + ")");
+                statement.executeUpdate("PRAGMA incremental_vacuum(" + asked + ")");
+                long took = System.currentTimeMillis() - started;
                 previous = free;
                 free = freePages(statement);
-                returned = returned + batch;
+                returned = returned + asked;
+
+                // How many pages go back in a call barely changes how fast they go, so the size is
+                // chosen for how often it reports and how often it lets go of the write lock: long
+                // enough that standing back between calls costs little, short enough that a call
+                // finishes while somebody is still watching.
+                batch = adjust(batch, asked, took);
 
                 // Stand back before asking for the write lock again. Each of these is a write
                 // transaction, and SQLite does not hand the lock out in turn: taking it back the
                 // instant it is released keeps anything else waiting out for as long as this runs,
                 // however short each transaction is. After a large compact this runs for minutes.
-                CompactProgress.set("returning freed space", ColdStorageStats.format((outstanding - free) * pageSize)
-                        + " of " + ColdStorageStats.format(outstanding * pageSize)
-                        + remaining(begun, outstanding - free, free));
-                yieldWriteLock(System.currentTimeMillis() - started);
+                report(outstanding, free, pageSize, begun);
+                yieldWriteLock(took);
                 if (stop != null) {
                     try {
                         stop.beforeSegment();
@@ -419,17 +433,70 @@ public class Database extends Queue {
     }
 
     /**
-     * Pages handed back per call.
+     * Pages handed back per call, to begin with.
      *
      * <p>
-     * How many go back at a time barely affects how fast they go: the cost is moving them, not asking.
-     * What it does affect is how many times the lock is taken and given back, and standing back
-     * between those is what stops a long run of them from keeping everything else out. Asking for
-     * more at a time means standing back fewer times, which on a database with millions of pages to
-     * return is the difference between a minute of waiting and several.
+     * Small, because the first call is the one nobody knows the cost of. What a page costs to hand
+     * back depends on whether anything live has to be moved out of the way first, which varies by
+     * orders of magnitude between databases and between stretches of the same file. Starting small
+     * and growing while calls stay quick finds the right size within a few seconds; starting large
+     * can mean minutes of silence before the first one returns.
      * </p>
      */
-    private static final int RECLAIM_PAGES = 32000;
+    private static final long RECLAIM_FIRST_PAGES = 1000;
+
+    /** The most pages asked for in one call, once calls are known to be cheap. */
+    private static final long RECLAIM_MAXIMUM_PAGES = 65536;
+
+    /** The fewest, so an expensive stretch does not shrink the call down to nothing. */
+    private static final long RECLAIM_MINIMUM_PAGES = 100;
+
+    /**
+     * How long a call should take.
+     *
+     * <p>
+     * This is how long everything else on the server waits to write, since the whole call holds the
+     * write lock. A second is long enough that taking the lock is worth the trouble and short enough
+     * that logging does not visibly stall behind it.
+     * </p>
+     */
+    private static final long TARGET_MILLISECONDS = 1000;
+
+    /** Says how much space has gone back so far and how long the rest looks like taking. */
+    private static void report(long outstanding, long free, long pageSize, long begun) {
+        CompactProgress.set("returning freed space", ColdStorageStats.format((outstanding - free) * pageSize)
+                + " of " + ColdStorageStats.format(outstanding * pageSize)
+                + remaining(begun, outstanding - free, free));
+    }
+
+    /**
+     * Picks how many pages to ask for next, from how long the last call took.
+     *
+     * <p>
+     * The work per page varies by orders of magnitude: pages at the end of the file that are already
+     * free cost nothing to give up, while a live page at the end has to be moved somewhere earlier
+     * first, and its parent updated to say so. A fixed size therefore either crawls through the
+     * cheap stretches or disappears for minutes in the expensive ones. Aiming at a couple of seconds
+     * a call keeps it reporting either way.
+     * </p>
+     *
+     * @param batch
+     *            what was asked for last time
+     * @param asked
+     *            what was actually asked for, which may be less near the end
+     * @param took
+     *            how long that took
+     * @return what to ask for next
+     */
+    private static long adjust(long batch, long asked, long took) {
+        if (took < TARGET_MILLISECONDS / 2 && asked >= batch) {
+            return Math.min(RECLAIM_MAXIMUM_PAGES, batch * 2);
+        }
+        if (took > TARGET_MILLISECONDS * 2) {
+            return Math.max(RECLAIM_MINIMUM_PAGES, batch / 2);
+        }
+        return batch;
+    }
 
     /**
      * How long the rest of a run of pages is likely to take, in words.

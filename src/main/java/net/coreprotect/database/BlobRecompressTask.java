@@ -357,10 +357,22 @@ public final class BlobRecompressTask {
         // Compressed before the transaction is opened, never inside it. Compressing thirty two
         // groups at the level used for long term storage takes seconds, and doing it while holding
         // the write lock stops everything else on the server from logging for that whole time.
-        List<byte[]> compressedGroups = new ArrayList<>(groups.size());
-        for (ColdBlobStore.Group group : groups) {
-            byte[] compressed = SegmentDictionary.compress(group.frame, dictionaryId, connection);
-            compressedGroups.add(compressed);
+        //
+        // It is also the slowest thing a compact does and depends on nothing but the bytes, so the
+        // groups are compressed on as many cores as are spare. The dictionary is loaded first,
+        // because the threads doing the compressing have no connection to load it with.
+        SegmentDictionary.warm(dictionaryId, connection);
+        List<byte[]> compressedGroups;
+        try {
+            compressedGroups = CompactWorkers.map(groups, group -> SegmentDictionary.compressWith(group.frame, dictionaryId));
+        }
+        catch (SQLException failure) {
+            throw failure;
+        }
+        catch (Exception failure) {
+            throw new SQLException(failure);
+        }
+        for (byte[] compressed : compressedGroups) {
             stored = stored + compressed.length;
         }
 
@@ -468,6 +480,7 @@ public final class BlobRecompressTask {
      */
     private static long recompressRange(Connection connection, String table, Columns columns, long after, long through) throws SQLException {
         List<Object[]> rows = new ArrayList<>();
+        List<byte[]> blobs = new ArrayList<>();
         long before = 0;
         long now = 0;
         boolean anyChanged = false;
@@ -485,18 +498,35 @@ public final class BlobRecompressTask {
 
                     byte[] stored = results.getBytes(columns.dataColumn + 1);
                     before = before + (stored == null ? 0 : stored.length);
-                    byte[] replacement = compressed(stored);
-                    if (replacement != null) {
-                        row[columns.dataColumn] = replacement;
-                        anyChanged = true;
-                        now = now + replacement.length;
-                    }
-                    else {
-                        now = now + (stored == null ? 0 : stored.length);
-                    }
-
+                    blobs.add(stored);
                     rows.add(row);
                 }
+            }
+        }
+
+        // Compressing is what this costs, and it depends on nothing but the bytes, so it is done on
+        // as many cores as are spare rather than one row after another.
+        List<byte[]> replacements;
+        try {
+            replacements = CompactWorkers.map(blobs, BlobRecompressTask::compressed);
+        }
+        catch (SQLException failure) {
+            throw failure;
+        }
+        catch (Exception failure) {
+            throw new SQLException(failure);
+        }
+
+        for (int index = 0; index < rows.size(); index++) {
+            byte[] replacement = replacements.get(index);
+            byte[] stored = blobs.get(index);
+            if (replacement != null) {
+                rows.get(index)[columns.dataColumn] = replacement;
+                anyChanged = true;
+                now = now + replacement.length;
+            }
+            else {
+                now = now + (stored == null ? 0 : stored.length);
             }
         }
 

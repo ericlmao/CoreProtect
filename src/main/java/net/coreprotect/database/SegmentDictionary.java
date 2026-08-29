@@ -151,6 +151,53 @@ public final class SegmentDictionary {
     }
 
     /**
+     * Loads a dictionary for writing, so it can then be used from threads that hold no connection.
+     *
+     * @param dictionaryId
+     *            the dictionary to load, or 0 for none
+     * @param connection
+     *            an open connection
+     * @throws SQLException
+     *             if the dictionary cannot be read
+     */
+    public static void warm(int dictionaryId, Connection connection) throws SQLException {
+        if (dictionaryId > 0) {
+            compressor(dictionaryId, connection);
+        }
+    }
+
+    /**
+     * Compresses with a dictionary that has already been loaded.
+     *
+     * <p>
+     * Compressing is the slow part of packing and is what a compact spreads across cores, so it has
+     * to be possible without a connection: a connection belongs to one thread at a time, and reading
+     * a dictionary through it from several would corrupt whatever else it was doing.
+     * </p>
+     *
+     * @param data
+     *            the payload to compress
+     * @param dictionaryId
+     *            the dictionary to use, or 0 for none
+     * @return the compressed payload
+     * @throws SQLException
+     *             if the dictionary was never loaded
+     */
+    public static byte[] compressWith(byte[] data, int dictionaryId) throws SQLException {
+        if (data == null || data.length == 0 || !BlobCompression.isAvailable()) {
+            return data;
+        }
+        if (dictionaryId <= 0) {
+            return Zstd.compress(data, BlobCompression.storageLevel());
+        }
+        ZstdDictCompress cached = COMPRESSORS.get(dictionaryId);
+        if (cached == null) {
+            throw new SQLException("Compression dictionary " + dictionaryId + " was not loaded before use");
+        }
+        return Zstd.compress(data, cached);
+    }
+
+    /**
      * Compresses a segment payload with the given dictionary.
      *
      * @param data
