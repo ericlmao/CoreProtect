@@ -27,6 +27,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.consumer.Consumer;
+import net.coreprotect.utility.serialize.BlobDictionary;
 import net.coreprotect.consumer.Queue;
 import net.coreprotect.consumer.process.Process;
 import net.coreprotect.database.clickhouse.ClickHouseConsumerWriteBatch;
@@ -314,6 +315,48 @@ public class Database extends Queue {
         }
     }
 
+    /**
+     * Hands the pages the rewrite freed back to the file system.
+     *
+     * <p>
+     * An incremental vacuum is a transaction of its own and does nothing when one is already open,
+     * which is easy to miss: the call succeeds, reports nothing, and the file stays exactly the size
+     * it was. It is asked for every free page rather than a fixed number, because after this there
+     * can be a great many of them.
+     * </p>
+     *
+     * @param connection
+     *            an open connection
+     */
+    public static void reclaimFreePages(Connection connection) throws SQLException {
+        boolean autoCommit = connection.getAutoCommit();
+        if (!autoCommit) {
+            connection.commit();
+            connection.setAutoCommit(true);
+        }
+        try (Statement statement = connection.createStatement()) {
+            // The number of pages has to be given. Asked without one, the pragma returns a page at a
+            // time and the driver takes only the first, so the call appears to succeed while the file
+            // stays the size it was. It is repeated because pages can be freed as it works.
+            long previous = Long.MAX_VALUE;
+            long free = freePages(statement);
+            while (free > 0 && free < previous) {
+                statement.executeUpdate("PRAGMA incremental_vacuum(" + free + ")");
+                previous = free;
+                free = freePages(statement);
+            }
+        }
+        finally {
+            connection.setAutoCommit(autoCommit);
+        }
+    }
+
+    private static long freePages(Statement statement) throws SQLException {
+        try (ResultSet results = statement.executeQuery("PRAGMA freelist_count")) {
+            return results.next() ? results.getLong(1) : 0;
+        }
+    }
+
     public static void performCheckpoint(Statement statement, DatabaseType databaseType) throws SQLException {
         if (!databaseType.isSQLite()) {
             return;
@@ -530,6 +573,7 @@ public class Database extends Queue {
     public static void closeConnection() {
         SQLiteColdIndex.invalidate();
         SegmentDictionary.clearCache();
+        BlobDictionary.clear();
         if (ConfigHandler.sqliteDataSource != null) {
             try {
                 ConfigHandler.sqliteDataSource.close();

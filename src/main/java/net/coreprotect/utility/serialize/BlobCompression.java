@@ -3,6 +3,8 @@ package net.coreprotect.utility.serialize;
 import java.util.logging.Logger;
 
 import com.github.luben.zstd.Zstd;
+import com.github.luben.zstd.ZstdDictCompress;
+import com.github.luben.zstd.ZstdDictDecompress;
 
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
@@ -65,7 +67,7 @@ public final class BlobCompression {
         }
 
         try {
-            byte[] compressed = Zstd.compress(data, clampLevel(config.HOT_BLOB_COMPRESSION_LEVEL));
+            byte[] compressed = compressAt(data, clampLevel(config.HOT_BLOB_COMPRESSION_LEVEL));
             if (compressed.length >= data.length) {
                 return data;
             }
@@ -101,7 +103,59 @@ public final class BlobCompression {
             throw new IllegalArgumentException("Compressed blob declares an unusable length of " + size + " bytes");
         }
 
+        ZstdDictDecompress dictionary = BlobDictionary.reader(data);
+        if (dictionary != null) {
+            return Zstd.decompress(data, dictionary, (int) size);
+        }
         return Zstd.decompress(data, (int) size);
+    }
+
+    /**
+     * Compresses a blob at a given level, against the shared dictionary when there is one.
+     *
+     * <p>
+     * The dictionary is what makes this worthwhile on blobs of a few kilobytes; see
+     * {@link BlobDictionary}. Which dictionary was used is recorded in the frame, so this can change
+     * without anything already stored becoming unreadable.
+     * </p>
+     *
+     * @param data
+     *            the blob to compress
+     * @param level
+     *            the compression level
+     * @return the compressed blob
+     */
+    static byte[] compressAt(byte[] data, int level) {
+        ZstdDictCompress dictionary = BlobDictionary.writer(level);
+        if (dictionary != null) {
+            return Zstd.compress(data, dictionary);
+        }
+        return Zstd.compress(data, level);
+    }
+
+    /**
+     * Compresses a blob at the level used for data being packed away for the long term, against the
+     * shared dictionary when there is one.
+     *
+     * @param data
+     *            the blob to compress, may be null
+     * @return the compressed blob, or the original when it does not get smaller
+     */
+    public static byte[] recompress(byte[] data) {
+        if (data == null || data.length < MINIMUM_COMPRESSED_LENGTH || !isAvailable()) {
+            return data;
+        }
+
+        try {
+            byte[] compressed = compressAt(data, storageLevel());
+            return compressed.length >= data.length ? data : compressed;
+        }
+        catch (Throwable failure) {
+            if (isMissingNative(failure)) {
+                disableAfterNativeFailure(failure);
+            }
+            return data;
+        }
     }
 
     /**
@@ -158,7 +212,7 @@ public final class BlobCompression {
         }
 
         try {
-            byte[] compressed = Zstd.compress(data, clampLevel(Config.getGlobal().BLOB_COMPRESSION_LEVEL));
+            byte[] compressed = compressAt(data, clampLevel(Config.getGlobal().BLOB_COMPRESSION_LEVEL));
             return compressed.length >= data.length ? data : compressed;
         }
         catch (Throwable failure) {

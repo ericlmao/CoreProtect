@@ -9,7 +9,9 @@ import org.bukkit.command.CommandSender;
 
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.consumer.Consumer;
+import net.coreprotect.database.BlobRecompressTask;
 import net.coreprotect.database.ColdRollupTask;
+import net.coreprotect.database.ColdStorageStats;
 import net.coreprotect.database.Database;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
@@ -85,10 +87,17 @@ public class CompactCommand {
             // Segments written by older builds have no per player counts, which lookups rely on to
             // avoid opening segments that hold nothing for the player being searched for.
             ColdRollupTask.backfillStatistics(connection, CompactCommand::checkCancelled);
+            // Entity data is read one row at a time and so never reaches a segment. It is compressed
+            // where it lies instead, against a dictionary that supplies the repetition a single blob
+            // of a couple of kilobytes does not contain.
+            long blobBytes = BlobRecompressTask.run(connection, CompactCommand::checkCancelled);
             reclaimSpace(connection);
 
             Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_COMPLETED, NumberFormat.getInstance().format(sealed), (sealed == 1 ? Selector.FIRST : Selector.SECOND)));
-            if (sealed == 0) {
+            if (blobBytes > 0) {
+                Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_BLOBS, ColdStorageStats.format(blobBytes)));
+            }
+            if (sealed == 0 && blobBytes == 0) {
                 Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_NOTHING_TO_DO));
             }
         }
@@ -121,9 +130,11 @@ public class CompactCommand {
      *            an open connection
      */
     private static void reclaimSpace(Connection connection) {
-        try (Statement statement = connection.createStatement()) {
-            statement.executeUpdate("PRAGMA incremental_vacuum");
-            statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
+        try {
+            Database.reclaimFreePages(connection);
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
+            }
         }
         catch (SQLException e) {
             // The space is reused by future writes even when it cannot be returned right now.

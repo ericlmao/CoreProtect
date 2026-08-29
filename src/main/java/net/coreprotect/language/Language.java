@@ -51,6 +51,7 @@ public class Language {
         phrases.put(Phrase.CACHE_RELOAD, "Forcing reload of {mapping|world} caches from database.");
         phrases.put(Phrase.CHECK_CONFIG, "Please check config.yml");
         phrases.put(Phrase.COLD_STORAGE_ROLLED_UP, "Compressed storage updated. {0} {row|rows} packed.");
+        phrases.put(Phrase.COMPACT_BLOBS, "Entity data compressed, freeing {0}.");
         phrases.put(Phrase.COMPACT_COMPLETED, "Compacting complete. {0} {row|rows} packed into compressed storage.");
         phrases.put(Phrase.COMPACT_FAILED, "Compacting failed. Check the server log for details.");
         phrases.put(Phrase.COMPACT_NOTHING_TO_DO, "There was nothing left to compact.");

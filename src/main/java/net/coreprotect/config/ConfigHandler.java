@@ -41,6 +41,7 @@ import net.coreprotect.database.ConsumerWriteBatch.ReferenceKind;
 import net.coreprotect.database.Database;
 import net.coreprotect.database.DatabaseType;
 import net.coreprotect.database.DuckDBNativeSupport;
+import net.coreprotect.database.BlobRecompressTask;
 import net.coreprotect.database.LegacyImport;
 import net.coreprotect.database.SQLiteSchema;
 import net.coreprotect.database.clickhouse.ClickHouseDatabase;
@@ -978,6 +979,10 @@ public class ConfigHandler extends Queue {
 
         try (Connection connection = Database.getConnection(true, 0)) {
             Statement statement = connection.createStatement();
+
+            // Blobs are compressed against a shared dictionary, which has to be in hand before
+            // anything is logged or read back.
+            BlobRecompressTask.loadDictionaries(connection);
 
             ConfigHandler.checkPlayers(connection);
             boolean worldsLoaded = ConfigHandler.loadWorlds(statement); // Load world ID's into memory.
