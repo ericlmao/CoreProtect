@@ -28,6 +28,7 @@ public class SignMessageLookup {
 
     public static List<String> performLookup(String command, Statement statement, Location l, CommandSender commandSender, int page, int limit) {
         List<String> result = new ArrayList<>();
+        InspectorSource source = null;
 
         try {
             if (l == null) {
@@ -70,13 +71,15 @@ public class SignMessageLookup {
                 results = statement.executeQuery(query);
             }
             else {
-                query = "SELECT COUNT(*) as count from " + ConfigHandler.prefix + "sign " + WorldUtils.getWidIndex("sign") + "WHERE " + where + " LIMIT 1 OFFSET 0";
+                // Compressed storage as well as the live rows.
+                source = InspectorSource.open(statement.getConnection(), "sign", worldId, x, x, z, z, 0);
+                query = "SELECT COUNT(*) as count from " + source.table() + " " + source.index() + "WHERE " + where + " LIMIT 1 OFFSET 0";
                 results = statement.executeQuery(query);
                 while (results.next()) {
                     count = results.getInt("count");
                 }
                 results.close();
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",face,line_1,line_2,line_3,line_4,line_5,line_6,line_7,line_8 FROM " + ConfigHandler.prefix + "sign " + WorldUtils.getWidIndex("sign") + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + pageStart;
+                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",face,line_1,line_2,line_3,line_4,line_5,line_6,line_7,line_8 FROM " + source.table() + " " + source.index() + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + pageStart;
                 results = statement.executeQuery(query);
             }
 
@@ -191,6 +194,11 @@ public class SignMessageLookup {
         }
         catch (Exception e) {
             ErrorReporter.report(e);
+        }
+        finally {
+            if (source != null) {
+                source.close();
+            }
         }
 
         return result;

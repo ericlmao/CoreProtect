@@ -89,6 +89,19 @@ Cold Data: 212.0 MB (132,294,578 rows compressed).
 Entity Data: compressed in place, saving 51.0 GB.
 ```
 
+## The inspector
+
+`/co i` reads compressed storage as well as the live tables, so clicking a block shows its whole
+history rather than only what happened to it inside the hot window.
+
+That is affordable because the coordinates narrow it down: only the segments whose chunks could hold
+the block are opened, and only the rows in them at those coordinates are handed to the query. A click
+costs about what a small lookup costs.
+
+Two of the inspector's views are keyed by entity rather than by place — the contents of an entity's
+inventory, and interactions with an entity — and have no coordinates to narrow segments down with.
+Those still read the live tables only, since the alternative would be opening every segment there is.
+
 ## Limits
 
 * This layout is SQLite only. DuckDB and ClickHouse compress their own storage; MySQL is unchanged.

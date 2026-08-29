@@ -42,6 +42,8 @@ public class ChestTransactionLookup {
             ConfigHandler.lookupEntityContainer.remove(commandSender.getName());
         }
 
+        InspectorSource source = null;
+
         try {
             if (l == null) {
                 return result;
@@ -131,6 +133,18 @@ public class ChestTransactionLookup {
                 results = statement.executeQuery(query);
             }
             else {
+                if (entitySpawnRowId == null) {
+                    // Compressed storage as well as the live rows. A lookup by entity instead of by
+                    // place has no coordinates to narrow the segments down with, so it is left to the
+                    // live rows rather than opening every segment there is.
+                    int minimumX = exact ? l.getBlockX() : Math.min(x, x2);
+                    int maximumX = exact ? l.getBlockX() : Math.max(x, x2);
+                    int minimumZ = exact ? l.getBlockZ() : Math.min(z, z2);
+                    int maximumZ = exact ? l.getBlockZ() : Math.max(z, z2);
+                    source = InspectorSource.open(statement.getConnection(), tableName, worldId, minimumX, maximumX, minimumZ, maximumZ, 0);
+                    table = source.table();
+                    index = source.index();
+                }
                 query = "SELECT COUNT(*) as count FROM " + table + " " + index + "WHERE " + where + " LIMIT 1 OFFSET 0";
                 results = statement.executeQuery(query);
                 while (results.next()) {
@@ -224,6 +238,11 @@ public class ChestTransactionLookup {
         }
         catch (Exception e) {
             ErrorReporter.report(e);
+        }
+        finally {
+            if (source != null) {
+                source.close();
+            }
         }
 
         return result;
