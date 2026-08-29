@@ -416,8 +416,18 @@ public class Database extends Queue {
         }
     }
 
-    /** Pages handed back per call, so the write lock is never held for long. */
-    private static final int RECLAIM_PAGES = 4000;
+    /**
+     * Pages handed back per call.
+     *
+     * <p>
+     * How many go back at a time barely affects how fast they go: the cost is moving them, not asking.
+     * What it does affect is how many times the lock is taken and given back, and standing back
+     * between those is what stops a long run of them from keeping everything else out. Asking for
+     * more at a time means standing back fewer times, which on a database with millions of pages to
+     * return is the difference between a minute of waiting and several.
+     * </p>
+     */
+    private static final int RECLAIM_PAGES = 32000;
 
     /**
      * Waits a moment so another writer can take the lock.
