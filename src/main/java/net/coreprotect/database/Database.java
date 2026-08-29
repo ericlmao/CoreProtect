@@ -329,6 +329,20 @@ public class Database extends Queue {
      *            an open connection
      */
     public static void reclaimFreePages(Connection connection) throws SQLException {
+        reclaimFreePages(connection, null);
+    }
+
+    /**
+     * Hands the pages freed by compacting back to the file system, stopping when asked to.
+     *
+     * @param connection
+     *            an open connection
+     * @param stop
+     *            consulted between batches, or null to run to completion
+     * @throws SQLException
+     *             if the pages cannot be returned
+     */
+    public static void reclaimFreePages(Connection connection, ColdRollupTask.Callback stop) throws SQLException {
         boolean autoCommit = connection.getAutoCommit();
         if (!autoCommit) {
             connection.commit();
@@ -337,19 +351,36 @@ public class Database extends Queue {
         try (Statement statement = connection.createStatement()) {
             // The number of pages has to be given. Asked without one, the pragma returns a page at a
             // time and the driver takes only the first, so the call appears to succeed while the file
-            // stays the size it was. It is repeated because pages can be freed as it works.
+            // stays the size it was.
+            //
+            // It is asked for a bounded number at a time rather than for everything at once. Each
+            // call is a write transaction, and after a large compact there can be millions of pages
+            // to hand back; asked for in one go it holds the write lock for minutes, and everything
+            // else that wants to write gives up waiting. Asked for in pieces, the lock is released
+            // between them and logging carries on.
             long previous = Long.MAX_VALUE;
             long free = freePages(statement);
             while (free > 0 && free < previous) {
-                statement.executeUpdate("PRAGMA incremental_vacuum(" + free + ")");
+                statement.executeUpdate("PRAGMA incremental_vacuum(" + Math.min(free, RECLAIM_PAGES) + ")");
                 previous = free;
                 free = freePages(statement);
+                if (stop != null) {
+                    try {
+                        stop.beforeSegment();
+                    }
+                    catch (Exception exception) {
+                        return;
+                    }
+                }
             }
         }
         finally {
             connection.setAutoCommit(autoCommit);
         }
     }
+
+    /** Pages handed back per call, so the write lock is never held for long. */
+    private static final int RECLAIM_PAGES = 4000;
 
     private static long freePages(Statement statement) throws SQLException {
         try (ResultSet results = statement.executeQuery("PRAGMA freelist_count")) {

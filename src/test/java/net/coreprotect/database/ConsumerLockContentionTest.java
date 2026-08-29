@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -16,6 +17,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+
+import net.coreprotect.config.ConfigHandler;
 
 /**
  * The gate for the consumer being able to write while a background job is writing too.
@@ -172,6 +175,63 @@ class ConsumerLockContentionTest {
                 statement.executeUpdate("UPDATE co_database_lock SET status=1 WHERE rowid=1");
                 statement.executeUpdate("COMMIT");
             }
+        }
+    }
+
+    /**
+     * The failure seen in the wild: compacting freed several gigabytes of pages, handing them all
+     * back in one call held the write lock for minutes, and everything else gave up waiting. They are
+     * handed back a bounded number at a time now, which has to still return all of them.
+     */
+    @Test
+    void everyFreedPageIsHandedBackABoundedNumberAtATime(@TempDir Path directory) throws Exception {
+        // Whether pages can be handed back at all is a property of the file, fixed before it holds
+        // anything, so this one is built rather than borrowed from the shared setup.
+        Path file = directory.resolve("reclaim.db");
+        DatabaseType previousType = ConfigHandler.databaseType;
+        ConfigHandler.databaseType = DatabaseType.SQLITE;
+
+        try (Connection working = DriverManager.getConnection("jdbc:sqlite:" + file)) {
+            try (Statement statement = working.createStatement()) {
+                statement.executeUpdate("PRAGMA page_size=4096");
+                statement.executeUpdate("PRAGMA auto_vacuum=INCREMENTAL");
+                statement.executeUpdate("CREATE TABLE co_block (time INTEGER, user INTEGER, filler BLOB)");
+            }
+
+            byte[] filler = new byte[512];
+            working.setAutoCommit(false);
+            try (PreparedStatement statement = working.prepareStatement("INSERT INTO co_block (time, user, filler) VALUES (?,?,?)")) {
+                for (int row = 0; row < 100000; row++) {
+                    statement.setInt(1, row);
+                    statement.setInt(2, row);
+                    statement.setBytes(3, filler);
+                    statement.addBatch();
+                }
+                statement.executeBatch();
+            }
+            working.commit();
+            working.setAutoCommit(true);
+
+            try (Statement statement = working.createStatement()) {
+                statement.executeUpdate("DELETE FROM co_block");
+            }
+
+            long freed = freePages(working);
+            assertTrue(freed > 5000, "there are plenty of pages to hand back: " + freed);
+
+            Database.reclaimFreePages(working);
+
+            assertEquals(0, freePages(working), "every one of them was handed back");
+        }
+        finally {
+            ConfigHandler.databaseType = previousType;
+        }
+    }
+
+    private static long freePages(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery("PRAGMA freelist_count")) {
+            assertTrue(results.next());
+            return results.getLong(1);
         }
     }
 

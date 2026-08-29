@@ -139,7 +139,7 @@ public final class BlobRecompressTask {
         }
 
         if (saved > 0) {
-            Database.reclaimFreePages(connection);
+            Database.reclaimFreePages(connection, callback);
         }
         return saved;
     }
@@ -316,12 +316,22 @@ public final class BlobRecompressTask {
         }
         String insertRow = "INSERT INTO " + ConfigHandler.prefix + table + " (" + columns.list + ") VALUES (" + placeholders + ")";
 
+        // Compressed before the transaction is opened, never inside it. Compressing thirty two
+        // groups at the level used for long term storage takes seconds, and doing it while holding
+        // the write lock stops everything else on the server from logging for that whole time.
+        List<byte[]> compressedGroups = new ArrayList<>(groups.size());
+        for (ColdBlobStore.Group group : groups) {
+            byte[] compressed = SegmentDictionary.compress(group.frame, dictionaryId, connection);
+            compressedGroups.add(compressed);
+            stored = stored + compressed.length;
+        }
+
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
             try (PreparedStatement statement = connection.prepareStatement(insertGroup)) {
-                for (ColdBlobStore.Group group : groups) {
-                    byte[] compressed = SegmentDictionary.compress(group.frame, dictionaryId, connection);
+                for (int index = 0; index < groups.size(); index++) {
+                    ColdBlobStore.Group group = groups.get(index);
                     statement.setInt(1, tableId);
                     statement.setLong(2, group.firstRowId);
                     statement.setInt(3, dictionaryId);
@@ -331,9 +341,8 @@ public final class BlobRecompressTask {
                     // declared it as never empty, and that declaration cannot be taken back off a
                     // table that already exists. Groups written before it still carry theirs.
                     statement.setBytes(5, EMPTY);
-                    statement.setBytes(6, compressed);
+                    statement.setBytes(6, compressedGroups.get(index));
                     statement.addBatch();
-                    stored = stored + compressed.length;
                 }
                 statement.executeBatch();
             }

@@ -2,6 +2,7 @@ package net.coreprotect.database;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -165,6 +166,38 @@ class BlobRecompressTest {
         assertTrue(after.getBlobBytes() > 0, "the packed data is measured");
         assertTrue(after.getColdBytes() > before.getColdBytes(), "and counted as compressed storage");
         assertTrue(after.getHotBytes() < before.getHotBytes(), "while the live total falls");
+    }
+
+    @Test
+    void loggingCanKeepWritingWhilePackingRuns() throws Exception {
+        // A smoke test, not a proof. It catches packing that locks writers out altogether, which is
+        // worth catching; it does not show that compressing happens outside the write transaction,
+        // because the batches here are small enough to finish inside any sensible timeout either way.
+        List<Long> waits = new java.util.ArrayList<>();
+        Thread writer = new Thread(() -> {
+            try (Connection other = DriverManager.getConnection("jdbc:sqlite:" + file); Statement statement = other.createStatement()) {
+                statement.executeUpdate("PRAGMA busy_timeout=2000");
+                for (int attempt = 0; attempt < 40; attempt++) {
+                    long start = System.currentTimeMillis();
+                    statement.executeUpdate("BEGIN IMMEDIATE TRANSACTION");
+                    statement.executeUpdate("INSERT INTO co_entity (time, data) VALUES (1, NULL)");
+                    statement.executeUpdate("COMMIT");
+                    waits.add(System.currentTimeMillis() - start);
+                    Thread.sleep(5);
+                }
+            }
+            catch (Exception exception) {
+                waits.add(-1L);
+            }
+        }, "test-writer");
+
+        writer.start();
+        BlobRecompressTask.run(connection, () -> {
+        });
+        writer.join();
+
+        assertFalse(waits.contains(-1L), "every write got through");
+        assertTrue(waits.size() > 0, "the writer ran");
     }
 
     @Test

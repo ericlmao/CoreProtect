@@ -131,7 +131,7 @@ public class CompactCommand {
      */
     private static void reclaimSpace(Connection connection) {
         try {
-            Database.reclaimFreePages(connection);
+            Database.reclaimFreePages(connection, CompactCommand::checkCancelled);
             try (Statement statement = connection.createStatement()) {
                 statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
             }
