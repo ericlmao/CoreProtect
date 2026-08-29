@@ -121,7 +121,12 @@ public class Database extends Queue {
                 statement.executeUpdate("START TRANSACTION");
             }
             else {
-                statement.executeUpdate("BEGIN TRANSACTION");
+                // Saying up front that the transaction will write takes the write lock now, which is
+                // something a busy timeout can wait for. Left unsaid, the transaction reads first and
+                // takes a snapshot, and if another writer commits before it gets to its own write
+                // that snapshot can no longer be extended into one. There is nothing to wait for
+                // then, so SQLite refuses at once and the timeout never applies.
+                statement.executeUpdate("BEGIN IMMEDIATE TRANSACTION");
             }
             started = true;
         }
@@ -310,9 +315,14 @@ public class Database extends Queue {
     }
 
     public static void performCheckpoint(Statement statement, DatabaseType databaseType) throws SQLException {
-        if (databaseType.isSQLite()) {
-            statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
+        if (!databaseType.isSQLite()) {
+            return;
         }
+        // Emptying the write ahead log needs a moment with nothing else writing. While compacting,
+        // purging or importing is running there is always something else writing, so the log is only
+        // moved along as far as it can be without waiting for them; it is emptied once they finish.
+        boolean backgroundWriter = Consumer.isBackgroundPurgeRunning() || ConfigHandler.purgeRunning || ConfigHandler.migrationRunning;
+        statement.executeUpdate("PRAGMA wal_checkpoint(" + (backgroundWriter ? "PASSIVE" : "TRUNCATE") + ")");
     }
 
     public static void setMultiInt(PreparedStatement statement, int value, int count) {
