@@ -328,7 +328,7 @@ public final class EntitySpawnStatement {
                     int killRowId = resultSet.getInt("kill_rowid");
                     List<Object> state = null;
                     if (includeState) {
-                        state = EntityStatement.readData(resultSet, "data", Kind.ENTITY_SPAWN);
+                        state = EntityStatement.readData(resultSet, "data", Kind.ENTITY_SPAWN, connection, "entity_spawn", rowId);
                         if (state != null && state.size() < 4) {
                             state = null;
                         }

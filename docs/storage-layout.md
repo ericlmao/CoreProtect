@@ -59,21 +59,52 @@ Dictionaries are stored in the database next to the segment dictionaries and are
 blobs written before one existed, or against an earlier one, keep reading back. Each blob records
 which dictionary produced it.
 
+Better still, the blobs of neighbouring rows are compressed **together**, sixty four to a frame. A
+blob on its own is worth about thirty times; sixty four of them together are worth about seventy
+eight, because the compressor can see across rows as well as within them.
+
+Reading one row back then means unpacking the sixty four it sits with, which is only affordable
+because nothing has to be searched for. The group holding a row is `(rowid / 64) * 64`, which is also
+the group's key, so finding it is one seek; and the position of a blob inside the group is the sum of
+the lengths recorded before it. Both are arithmetic on numbers already in hand, and unpacking a group
+takes about six microseconds — less than fetching the row that asked for it.
+
+The newest rows are left alone. A group is only worth making once it is complete, so packing stops a
+group short of the end of the table and those rows are compressed one at a time until later runs
+overtake them.
+
 `/co compact` and the nightly maintenance run do this work, in batches, resuming where they left off
-if interrupted.
+if interrupted. Groups whose rows have all been removed by retention are dropped with them.
 
 ### Where this shows up in `/co status`
 
-Entity data lives in the live tables, so compressing it makes **Hot Data** fall while **Cold Data**
-stays where it is — cold means segments, and entity rows never become segments. So that a falling
-hot size is not mistaken for data going missing, `/co status` also reports what the compression has
-saved:
+Packed entity data counts towards **Cold Data** along with the segments, because it is compressed
+storage too even though it is not a segment. `/co status` breaks it out so it is clear where the
+compressed total comes from, and reports what packing it saved:
 
 ```text
-Hot Data: 2.10 GB (recent activity, fully indexed).
-Cold Data: 212.0 MB (132,294,578 rows compressed).
-Entity Data: compressed in place, saving 51.0 GB.
+Hot Data: 1.40 GB (recent activity, fully indexed).
+Cold Data: 892.0 MB (132,294,578 rows compressed).
+Entity Data: 680.0 MB packed, saving 51.0 GB.
 ```
+
+The row count beside Cold Data counts rows held in segments. Packed entity blobs belong to rows that
+are still in the live tables, so they add to the compressed size without adding to that count.
+
+## The inspector
+
+`/co i` reads compressed storage as well as the live tables, so clicking a block shows its whole
+history rather than only what happened to it inside the hot window.
+
+That is affordable because the coordinates narrow it down: only the segments whose chunks could hold
+the block are opened, and only the rows in them at those coordinates are handed to the query. A click
+costs about what a small lookup costs.
+
+Two of its views are keyed by an entity rather than by a place — the contents of an entity's
+inventory, and interactions with an entity. They have no coordinates to go on, so each segment also
+records which entities it holds rows for, and a lookup about one entity opens only the segments that
+could hold something of it. Segments written before that was recorded gain it on the next
+`/co compact`.
 
 ## Limits
 

@@ -55,6 +55,8 @@ public class Language {
         phrases.put(Phrase.COMPACT_COMPLETED, "Compacting complete. {0} {row|rows} packed into compressed storage.");
         phrases.put(Phrase.COMPACT_FAILED, "Compacting failed. Check the server log for details.");
         phrases.put(Phrase.COMPACT_NOTHING_TO_DO, "There was nothing left to compact.");
+        phrases.put(Phrase.COMPACT_PROGRESS, "Compacting: {0}.");
+        phrases.put(Phrase.COMPACT_REBUILD_PENDING, "The file is mostly free space ({0}). It is written out afresh when the server stops, which takes minutes rather than days.");
         phrases.put(Phrase.COMPACT_STARTED, "Compacting older data into compressed storage. The server remains usable.");
         phrases.put(Phrase.COMPACT_STOPPED, "Compacting stopped early. The remaining data is packed on the next run.");
         phrases.put(Phrase.COMPACT_UNSUPPORTED, "Compressed storage is only used by SQLite. This server uses {0}.");
@@ -272,7 +274,7 @@ public class Language {
         phrases.put(Phrase.STATUS_CONSUMER, "Consumer: {0} {item|items} in queue.");
         phrases.put(Phrase.STATUS_DATABASE, "Database: Using {0}.");
         phrases.put(Phrase.STATUS_DATABASE_STATE, "({writes halted|unreachable})");
-        phrases.put(Phrase.STATUS_ENTITY_DATA, "Entity Data: compressed in place, saving {0}.");
+        phrases.put(Phrase.STATUS_ENTITY_DATA, "Entity Data: {0} packed, saving {1}.");
         phrases.put(Phrase.STATUS_HOT_DATA, "Hot Data: {0} (recent activity, fully indexed).");
         phrases.put(Phrase.STATUS_INTEGRATION, "{0}: Integration {enabled|disabled}.");
         phrases.put(Phrase.STATUS_LICENSE, "License: {0}");

@@ -347,9 +347,12 @@ class ColdStorageTest {
         long sealed = ColdRollupTask.rollUp(connection, () -> {
         }, now);
 
-        assertEquals(300, sealed);
-        assertEquals(0, count("SELECT COUNT(*) FROM co_block"));
-        assertEquals(300, count("SELECT SUM(row_count) FROM co_segment"));
+        // All but the newest row. That one stays so the table can carry on numbering above the
+        // segments; sealing it too would let the next row written start again at one, on top of row
+        // ids the segments already hold.
+        assertEquals(299, sealed);
+        assertEquals(1, count("SELECT COUNT(*) FROM co_block"));
+        assertEquals(299, count("SELECT SUM(row_count) FROM co_segment"));
     }
 
     @Test
@@ -426,7 +429,9 @@ class ColdStorageTest {
         long removed = PurgeExecutor.purgeColdSegments(connection, now - (180 * DAY), Connection::prepareStatement, () -> {
         });
 
-        assertEquals(120, removed);
+        // One row short of everything written: sealing leaves the newest row in the live table so the
+        // table can carry on numbering above the segments, and a live row is not a segment to drop.
+        assertEquals(119, removed);
         assertEquals(0, count("SELECT COUNT(*) FROM co_segment"));
     }
 

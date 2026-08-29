@@ -38,6 +38,20 @@ public final class SegmentMembership {
      * @return the stored form, or null when nothing was seen
      */
     public static byte[] encode(long[] values) {
+        return encode(values, SegmentFilter.SMALL_BYTES);
+    }
+
+    /**
+     * Encodes the distinct values of a column in one segment, choosing the filter size for how many
+     * of them there can be.
+     *
+     * @param values
+     *            the distinct values seen, may be empty
+     * @param filterBytes
+     *            the size of the filter to fall back to when there are too many to list
+     * @return the stored form, or null when nothing was seen
+     */
+    public static byte[] encode(long[] values, int filterBytes) {
         if (values == null || values.length == 0) {
             return null;
         }
@@ -56,7 +70,7 @@ public final class SegmentMembership {
             return encoded;
         }
 
-        SegmentFilter bloom = new SegmentFilter(SegmentFilter.SMALL_BYTES);
+        SegmentFilter bloom = new SegmentFilter(filterBytes);
         for (long value : values) {
             bloom.add(value);
         }
@@ -77,9 +91,10 @@ public final class SegmentMembership {
             return null;
         }
 
-        if (encoded.length == SegmentFilter.SMALL_BYTES) {
+        if (encoded.length == SegmentFilter.SMALL_BYTES || encoded.length == SegmentFilter.CHUNK_BYTES) {
             // Segments written before this format carried a bare filter with no tag byte. An exact
-            // list is always one byte plus a multiple of eight, so it can never be this length.
+            // list is always one byte plus a multiple of eight, and a tagged filter one byte more
+            // than its size, so neither can ever be exactly a filter's length.
             return new SegmentMembership(null, SegmentFilter.fromBytes(encoded));
         }
 

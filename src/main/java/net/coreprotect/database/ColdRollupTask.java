@@ -15,6 +15,7 @@ import java.util.Set;
 
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.utility.Chat;
 
 /**
  * Moves activity older than the hot window out of the live tables and into compressed cold
@@ -29,6 +30,12 @@ import net.coreprotect.config.ConfigHandler;
  * </p>
  */
 public final class ColdRollupTask {
+
+    /**
+     * Segments read ahead of the one being written, so that several can be encoded and compressed at
+     * once. Held down because a segment's rows are in memory until it is written.
+     */
+    private static final int READ_AHEAD_SEGMENTS = 4;
 
     /** Rows per segment. Small enough to decode quickly, large enough to compress well. */
     static final int SEGMENT_ROWS = 65536;
@@ -146,7 +153,8 @@ public final class ColdRollupTask {
      */
     public static long backfillStatistics(Connection connection, Callback callback) throws Exception {
         List<Long> pending = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement("SELECT id FROM " + ConfigHandler.prefix + "segment WHERE user_stats IS NULL OR action_stats IS NULL ORDER BY id");
+        try (PreparedStatement statement = connection.prepareStatement("SELECT id FROM " + ConfigHandler.prefix + "segment WHERE user_stats IS NULL OR action_stats IS NULL"
+                        + " OR (spawn_filter IS NULL AND table_id IN(" + SQLiteColdIndex.entityKeyedTableIds() + ")) ORDER BY id");
                 ResultSet results = statement.executeQuery()) {
             while (results.next()) {
                 pending.add(results.getLong(1));
@@ -164,10 +172,12 @@ public final class ColdRollupTask {
         }
 
         long updated = 0;
-        String update = "UPDATE " + ConfigHandler.prefix + "segment SET user_stats = ?, type_stats = ?, action_stats = ? WHERE id = ?";
+        long examined = 0;
+        String update = "UPDATE " + ConfigHandler.prefix + "segment SET user_stats = ?, type_stats = ?, action_stats = ?, spawn_filter = ? WHERE id = ?";
         try (PreparedStatement statement = connection.prepareStatement(update)) {
             for (Long id : pending) {
                 callback.beforeSegment();
+                CompactProgress.set("checking compressed storage", ++examined, pending.size());
 
                 SQLiteColdIndex.ColdSegment segment = SQLiteColdIndex.segmentById(connection, id);
                 if (segment == null) {
@@ -194,7 +204,8 @@ public final class ColdRollupTask {
                 int userColumn = columnIndex(layout, "user");
                 int typeColumn = columnIndex(layout, "type");
                 int actionColumn = columnIndex(layout, "action");
-                if (userColumn < 0 && typeColumn < 0 && actionColumn < 0) {
+                int spawnColumn = columnIndex(layout, "entity_spawn_rowid");
+                if (userColumn < 0 && typeColumn < 0 && actionColumn < 0 && spawnColumn < 0) {
                     continue;
                 }
 
@@ -202,8 +213,12 @@ public final class ColdRollupTask {
                 Map<Long, Integer> userCounts = new HashMap<>();
                 Map<Long, Integer> typeCounts = new HashMap<>();
                 Map<Long, Integer> actionCounts = new HashMap<>();
+                Set<Long> spawnIds = new LinkedHashSet<>();
                 for (int row = 0; row < rows.size(); row++) {
                     Object[] values = rows.getValues(row);
+                    if (spawnColumn >= 0 && values[spawnColumn] != null) {
+                        spawnIds.add(((Number) values[spawnColumn]).longValue());
+                    }
                     if (userColumn >= 0 && values[userColumn] != null && userCounts.size() <= SegmentStatistics.MAXIMUM_VALUES) {
                         userCounts.merge(((Number) values[userColumn]).longValue(), 1, Integer::sum);
                     }
@@ -218,7 +233,8 @@ public final class ColdRollupTask {
                 statement.setBytes(1, SegmentStatistics.encode(userCounts));
                 statement.setBytes(2, SegmentStatistics.encode(typeCounts));
                 statement.setBytes(3, SegmentStatistics.encode(actionCounts));
-                statement.setLong(4, id);
+                statement.setBytes(4, spawnColumn < 0 ? null : SegmentMembership.encode(toArray(spawnIds)));
+                statement.setLong(5, id);
                 statement.executeUpdate();
                 updated++;
             }
@@ -279,36 +295,102 @@ public final class ColdRollupTask {
         long trainingBytes = 0;
         int dictionaryId = SegmentDictionary.currentDictionary(connection, tableId);
 
+        // The newest row is never sealed, so the live table never empties. SQLite gives a new row the
+        // highest row id in the table plus one, and it only knows about the rows still there: empty
+        // the table and the next row written starts again at one, on top of row ids the segments are
+        // already using. Everything here relies on a segment's row ids being below the live table's,
+        // so one row is left behind to hold the numbering up. It is sealed by a later run, once newer
+        // rows have taken its place.
+        long ceiling = Math.min(maxRowId, liveMaximumRowId(connection, table) - 1);
+
+        // Where reading has reached, kept here rather than asked of the index each time round, so
+        // that the next segments can be read while the last ones are still being encoded.
+        long cursor = SQLiteColdIndex.coldHighWaterMark(table);
+
         while (true) {
             callback.beforeSegment();
 
-            long highWater = SQLiteColdIndex.coldHighWaterMark(table);
-            Block block = readBlock(connection, table, layout, highWater, sealBefore, maxRowId);
-            if (block == null || block.rowIds.isEmpty()) {
+            // Until a dictionary has been trained the segments have to be encoded one at a time,
+            // since each one contributes to what the dictionary is trained on and the ones after it
+            // are compressed against the result.
+            int depth = dictionaryId == 0 ? 1 : Math.min(CompactWorkers.threads(), READ_AHEAD_SEGMENTS);
+            List<Block> blocks = new ArrayList<>(depth);
+            for (int index = 0; index < depth; index++) {
+                Block block = readBlock(connection, table, layout, cursor, sealBefore, ceiling);
+                if (block == null || block.rowIds.isEmpty()) {
+                    break;
+                }
+                cursor = block.maxRowId;
+                blocks.add(block);
+            }
+
+            if (blocks.isEmpty()) {
                 break;
             }
 
-            ColdSegmentCodec.Frames frames = ColdSegmentCodec.encode(layout.types, toArray(block.rowIds), block.rows);
-
-            if (dictionaryId == 0 && trainingBytes < TRAINING_TARGET_BYTES && frames.getPayload().length > 0) {
-                trainingSamples.addAll(ColdSegmentCodec.payloadSamples(frames.getScalars(), frames.getPayload()));
-                trainingBytes = trainingBytes + frames.getPayload().length;
-                if (trainingBytes >= TRAINING_TARGET_BYTES) {
-                    dictionaryId = SegmentDictionary.train(connection, tableId, trainingSamples);
-                    trainingSamples.clear();
+            if (dictionaryId == 0 && trainingBytes < TRAINING_TARGET_BYTES) {
+                Block block = blocks.get(0);
+                ColdSegmentCodec.Frames frames = ColdSegmentCodec.encode(layout.types, toArray(block.rowIds), block.rows);
+                if (frames.getPayload().length > 0) {
+                    trainingSamples.addAll(ColdSegmentCodec.payloadSamples(frames.getScalars(), frames.getPayload()));
+                    trainingBytes = trainingBytes + frames.getPayload().length;
+                    if (trainingBytes >= TRAINING_TARGET_BYTES) {
+                        dictionaryId = SegmentDictionary.train(connection, tableId, trainingSamples);
+                        trainingSamples.clear();
+                    }
                 }
             }
 
-            byte[] scalarFrame = SegmentDictionary.compress(frames.getScalars(), 0, connection);
-            byte[] payloadFrame = frames.getPayload().length == 0 ? null : SegmentDictionary.compress(frames.getPayload(), dictionaryId, connection);
+            // Encoding, checking and compressing a segment is the slow part of sealing and touches
+            // nothing but the rows it was handed, so the segments in hand are prepared on as many
+            // cores as are spare. They are written afterwards, in order, on this thread, because the
+            // database takes one writer and their row ids have to stay in order.
+            SegmentDictionary.warm(dictionaryId, connection);
+            int dictionary = dictionaryId;
+            List<Sealed> prepared;
+            try {
+                prepared = CompactWorkers.map(blocks, block -> {
+                    ColdSegmentCodec.Frames frames = ColdSegmentCodec.encode(layout.types, toArray(block.rowIds), block.rows);
+                    verify(frames, layout, block);
+                    byte[] scalars = SegmentDictionary.compressWith(frames.getScalars(), 0);
+                    byte[] payload = frames.getPayload().length == 0 ? null : SegmentDictionary.compressWith(frames.getPayload(), dictionary);
+                    return new Sealed(block, frames, scalars, payload);
+                });
+            }
+            catch (SQLException failure) {
+                throw failure;
+            }
+            catch (RuntimeException failure) {
+                throw failure;
+            }
+            catch (Exception failure) {
+                throw new SQLException(failure);
+            }
 
-            verify(frames, layout, block);
-            writeSegment(connection, tableId, table, block, layout, frames, scalarFrame, payloadFrame, dictionaryId);
+            for (Sealed segment : prepared) {
+                writeSegment(connection, tableId, table, segment.block, layout, segment.frames, segment.scalars, segment.payload, dictionaryId);
+                sealed = sealed + segment.block.rowIds.size();
+                CompactProgress.set("packing " + table + " into compressed storage", sealed, 0);
+            }
             SQLiteColdIndex.reload(connection);
-            sealed = sealed + block.rowIds.size();
         }
 
         return sealed;
+    }
+
+    /** A segment that has been encoded, checked and compressed, and is waiting to be written. */
+    private static final class Sealed {
+        private final Block block;
+        private final ColdSegmentCodec.Frames frames;
+        private final byte[] scalars;
+        private final byte[] payload;
+
+        private Sealed(Block block, ColdSegmentCodec.Frames frames, byte[] scalars, byte[] payload) {
+            this.block = block;
+            this.frames = frames;
+            this.scalars = scalars;
+            this.payload = payload;
+        }
     }
 
     /**
@@ -333,8 +415,8 @@ public final class ColdRollupTask {
     private static void writeSegment(Connection connection, int tableId, String table, Block block, SQLiteColdIndex.TableLayout layout, ColdSegmentCodec.Frames frames, byte[] scalarFrame, byte[] payloadFrame, int dictionaryId) throws SQLException {
         String insert = "INSERT INTO " + ConfigHandler.prefix + "segment (table_id,start_rowid,end_rowid,row_count,min_time,max_time,day,"
                 + "wid_set,chunk_filter,user_filter,type_filter,action_bits,dict_id,codec_version,scalars,scalars_size,payload,payload_size,"
-                + "user_stats,type_stats,action_stats) "
-                + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                + "user_stats,type_stats,action_stats,spawn_filter) "
+                + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
@@ -348,7 +430,7 @@ public final class ColdRollupTask {
                 statement.setLong(6, block.maxTime);
                 statement.setLong(7, block.minTime / SECONDS_PER_DAY);
                 statement.setBytes(8, SQLiteColdIndex.writeWorldIds(new ArrayList<>(block.worldIds)));
-                statement.setBytes(9, block.chunkFilter == null ? null : block.chunkFilter.toBytes());
+                statement.setBytes(9, SegmentMembership.encode(toArray(block.chunkKeys), SegmentFilter.CHUNK_BYTES));
                 statement.setBytes(10, SegmentMembership.encode(toArray(block.userIds)));
                 statement.setBytes(11, SegmentMembership.encode(toArray(block.typeIds)));
                 statement.setLong(12, block.actionBits);
@@ -361,6 +443,7 @@ public final class ColdRollupTask {
                 statement.setBytes(19, SegmentStatistics.encode(block.userCounts));
                 statement.setBytes(20, SegmentStatistics.encode(block.typeCounts));
                 statement.setBytes(21, SegmentStatistics.encode(block.actionCounts));
+                statement.setBytes(22, SegmentMembership.encode(toArray(block.spawnIds)));
                 statement.executeUpdate();
             }
 
@@ -389,22 +472,107 @@ public final class ColdRollupTask {
         }
     }
 
-    /** One block of consecutive rows, ready to be encoded. */
+    /**
+     * One block of consecutive rows, ready to be encoded.
+     *
+     * <p>
+     * The sets of distinct values are collected in full rather than stopping at the point where they
+     * would no longer be listed exactly. What is stored is decided when the segment is written, and
+     * deciding it while reading would build a filter that knew about only the values seen up to the
+     * cut off: a lookup for any of the rest would be told the segment does not hold them, and its
+     * rows would go missing. A segment holds at most 65,536 rows, so the sets are bounded anyway.
+     * </p>
+     */
     private static final class Block {
         private final List<Long> rowIds = new ArrayList<>();
         private final List<Object[]> rows = new ArrayList<>();
         private final Set<Integer> worldIds = new LinkedHashSet<>();
         private final Set<Long> userIds = new LinkedHashSet<>();
         private final Set<Long> typeIds = new LinkedHashSet<>();
+        private final Set<Long> spawnIds = new LinkedHashSet<>();
         private final Map<Long, Integer> userCounts = new HashMap<>();
         private final Map<Long, Integer> typeCounts = new HashMap<>();
         private final Map<Long, Integer> actionCounts = new HashMap<>();
-        private SegmentFilter chunkFilter;
+        private final Set<Long> chunkKeys = new LinkedHashSet<>();
         private long actionBits;
         private long minTime = Long.MAX_VALUE;
         private long maxTime = Long.MIN_VALUE;
         private long minRowId = Long.MAX_VALUE;
         private long maxRowId = Long.MIN_VALUE;
+    }
+
+    /**
+     * @return the highest row id the live table holds, or 0 when it holds nothing
+     */
+    private static long liveMaximumRowId(Connection connection, String table) throws SQLException {
+        try (Statement statement = connection.createStatement();
+                ResultSet results = statement.executeQuery("SELECT COALESCE(MAX(rowid),0) FROM " + ConfigHandler.prefix + table)) {
+            return results.next() ? results.getLong(1) : 0;
+        }
+    }
+
+    /**
+     * Moves live rows back above the segments when their row ids have run into them.
+     *
+     * <p>
+     * A table that was emptied by an earlier build started numbering again from one, over row ids its
+     * segments already hold. Those rows can never be sealed, because sealing only ever looks above
+     * the highest row id already sealed, and while they are there a lookup reading the live rows and
+     * the segments together sees two different rows under one number. Moving them above everything
+     * restores the order the rest of the design depends on.
+     * </p>
+     *
+     * @param connection
+     *            an open connection
+     * @param callback
+     *            invoked per table; throwing stops the repair
+     * @return the number of rows moved
+     * @throws Exception
+     *             if the rows cannot be moved
+     */
+    public static long repairRowIds(Connection connection, Callback callback) throws Exception {
+        // Which row ids the segments hold is read from the index, and the index is empty until it has
+        // been read from the database. Without this the repair sees no segments, decides there is
+        // nothing underneath them, and quietly does nothing.
+        SQLiteColdIndex.reload(connection);
+
+        long moved = 0;
+        for (String table : SQLiteColdIndex.getSegmentedTables()) {
+            callback.beforeSegment();
+
+            CompactProgress.set("checking row numbering", 0, 0);
+            long highWater = SQLiteColdIndex.coldHighWaterMark(table);
+            if (highWater == 0) {
+                continue;
+            }
+
+            long lowest;
+            long highest;
+            try (Statement statement = connection.createStatement();
+                    ResultSet results = statement.executeQuery("SELECT COALESCE(MIN(rowid),0), COALESCE(MAX(rowid),0) FROM " + ConfigHandler.prefix + table)) {
+                results.next();
+                lowest = results.getLong(1);
+                highest = results.getLong(2);
+            }
+            if (lowest == 0 || lowest > highWater) {
+                continue;
+            }
+
+            // Above the segments and above anything the table already holds, so nothing is moved onto
+            // a row id that is in use.
+            long offset = Math.max(highWater, highest) - lowest + 1;
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE " + ConfigHandler.prefix + table + " SET rowid = rowid + ? WHERE rowid <= ?")) {
+                statement.setLong(1, offset);
+                statement.setLong(2, highWater);
+                int updated = statement.executeUpdate();
+                moved = moved + updated;
+                if (updated > 0) {
+                    Chat.console("Moved " + updated + " rows of " + table + " above compressed storage, where their numbering had run into it.");
+                }
+            }
+        }
+        return moved;
     }
 
     private static Block readBlock(Connection connection, String table, SQLiteColdIndex.TableLayout layout, long afterRowId, long sealBefore, long maxRowId) throws SQLException {
@@ -420,6 +588,7 @@ public final class ColdRollupTask {
         int userColumn = columnIndex(layout, "user");
         int typeColumn = columnIndex(layout, "type");
         int actionColumn = columnIndex(layout, "action");
+        int spawnColumn = columnIndex(layout, "entity_spawn_rowid");
         long day = -1;
 
         try (PreparedStatement statement = connection.prepareStatement(query)) {
@@ -455,20 +624,16 @@ public final class ColdRollupTask {
                         int worldId = ((Number) values[layout.worldColumn]).intValue();
                         block.worldIds.add(worldId);
                         if (layout.xColumn >= 0 && layout.zColumn >= 0 && values[layout.xColumn] != null && values[layout.zColumn] != null) {
-                            if (block.chunkFilter == null) {
-                                block.chunkFilter = new SegmentFilter(SegmentFilter.CHUNK_BYTES);
-                            }
+
                             int x = ((Number) values[layout.xColumn]).intValue();
                             int z = ((Number) values[layout.zColumn]).intValue();
-                            block.chunkFilter.add(SegmentFilter.chunkKey(worldId, SegmentFilter.chunkOf(x), SegmentFilter.chunkOf(z)));
+                            block.chunkKeys.add(SegmentFilter.chunkKey(worldId, SegmentFilter.chunkOf(x), SegmentFilter.chunkOf(z)));
                         }
                     }
 
                     if (userColumn >= 0 && values[userColumn] != null) {
                         long userId = ((Number) values[userColumn]).longValue();
-                        if (block.userIds.size() <= SegmentMembership.MAXIMUM_EXACT_VALUES) {
-                            block.userIds.add(userId);
-                        }
+                        block.userIds.add(userId);
                         if (block.userCounts.size() <= SegmentStatistics.MAXIMUM_VALUES) {
                             block.userCounts.merge(userId, 1, Integer::sum);
                         }
@@ -476,12 +641,14 @@ public final class ColdRollupTask {
 
                     if (typeColumn >= 0 && values[typeColumn] != null) {
                         long typeId = ((Number) values[typeColumn]).longValue();
-                        if (block.typeIds.size() <= SegmentMembership.MAXIMUM_EXACT_VALUES) {
-                            block.typeIds.add(typeId);
-                        }
+                        block.typeIds.add(typeId);
                         if (block.typeCounts.size() <= SegmentStatistics.MAXIMUM_VALUES) {
                             block.typeCounts.merge(typeId, 1, Integer::sum);
                         }
+                    }
+
+                    if (spawnColumn >= 0 && values[spawnColumn] != null) {
+                        block.spawnIds.add(((Number) values[spawnColumn]).longValue());
                     }
 
                     if (actionColumn >= 0 && values[actionColumn] != null) {

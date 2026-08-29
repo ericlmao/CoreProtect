@@ -83,7 +83,7 @@ class BlobRecompressBenchmark {
             }
 
             Map<Long, byte[]> after = readAll(connection);
-            long blobBytesAfter = storedBytes(connection);
+            long blobBytesAfter = storedBytes(connection) + groupedBytes(connection);
             long fileAfter = Files.size(working);
 
             // Every blob has to come back exactly, or the number below means nothing.
@@ -96,8 +96,10 @@ class BlobRecompressBenchmark {
                     before.size(), blobBytesBefore, blobBytesAfter, blobBytesBefore / (double) blobBytesAfter, saved,
                     fileBefore, fileAfter, elapsed, before.size() / Math.max(elapsed / 1000.0, 0.001));
 
-            assertTrue(blobBytesAfter * 8 < blobBytesBefore, "real data compresses by more than eight times");
-            assertTrue(fileAfter * 4 < fileBefore, "and the file it is stored in shrinks with it");
+            // Compressing these blobs one at a time is worth about thirty times. Grouping them has to
+            // be far ahead of that to be worth unpacking a group to read one row.
+            assertTrue(blobBytesAfter * 50 < blobBytesBefore, "grouping beats compressing each blob singly");
+            assertTrue(fileAfter * 25 < fileBefore, "and the file it is stored in shrinks with it");
         }
         finally {
             BlobDictionary.clear();
@@ -106,15 +108,32 @@ class BlobRecompressBenchmark {
         }
     }
 
+    /** Reads every blob the way the plugin does: from the row when it is there, from its group when not. */
     private static Map<Long, byte[]> readAll(Connection connection) throws SQLException {
         Map<Long, byte[]> rows = new HashMap<>();
+        java.util.List<Long> packedAway = new java.util.ArrayList<>();
         try (Statement statement = connection.createStatement();
                 ResultSet results = statement.executeQuery("SELECT rowid, data FROM co_entity ORDER BY rowid")) {
             while (results.next()) {
-                rows.put(results.getLong(1), BlobCompression.decompress(results.getBytes(2)));
+                byte[] stored = results.getBytes(2);
+                if (stored == null || stored.length == 0) {
+                    packedAway.add(results.getLong(1));
+                }
+                else {
+                    rows.put(results.getLong(1), BlobCompression.decompress(stored));
+                }
             }
         }
+        rows.putAll(ColdBlobStore.load(connection, "entity", packedAway));
         return rows;
+    }
+
+    /** The bytes the packed groups occupy, which is where most of the blobs end up. */
+    private static long groupedBytes(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement();
+                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data)),0) FROM co_blob_group")) {
+            return results.next() ? results.getLong(1) : 0;
+        }
     }
 
     /** The bytes the blobs actually occupy in the table, which is what this is about. */

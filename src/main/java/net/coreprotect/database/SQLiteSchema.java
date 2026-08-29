@@ -139,13 +139,20 @@ public final class SQLiteSchema {
                 + "row_count INTEGER NOT NULL, min_time INTEGER NOT NULL, max_time INTEGER NOT NULL, day INTEGER NOT NULL, "
                 + "wid_set BLOB, chunk_filter BLOB, user_filter BLOB, type_filter BLOB, action_bits INTEGER NOT NULL, "
                 + "dict_id INTEGER NOT NULL, codec_version INTEGER NOT NULL, scalars BLOB NOT NULL, scalars_size INTEGER NOT NULL, "
-                + "payload BLOB, payload_size INTEGER NOT NULL, user_stats BLOB, type_stats BLOB, action_stats BLOB);");
+                + "payload BLOB, payload_size INTEGER NOT NULL, user_stats BLOB, type_stats BLOB, action_stats BLOB, spawn_filter BLOB);");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS " + prefix + "segment_rowid_index ON " + prefix + "segment(table_id,end_rowid);");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS " + prefix + "segment_time_index ON " + prefix + "segment(table_id,max_time);");
 
         statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "segment_dict ("
                 + "dict_id INTEGER PRIMARY KEY, table_id INTEGER NOT NULL, time INTEGER NOT NULL, sample_bytes INTEGER NOT NULL, "
                 + "data BLOB NOT NULL);");
+
+        // Blobs of consecutive rows, compressed together. Keyed by the row id the group begins at,
+        // which is worked out from a row id rather than looked up.
+        statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "blob_group ("
+                + "table_id INTEGER NOT NULL, first_rowid INTEGER NOT NULL, dict_id INTEGER NOT NULL, "
+                + "raw_size INTEGER NOT NULL, sizes BLOB, data BLOB NOT NULL, "
+                + "PRIMARY KEY (table_id, first_rowid)) WITHOUT ROWID;");
 
         statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "cold_flag ("
                 + "table_id INTEGER NOT NULL, rowid_ref INTEGER NOT NULL, rolled_back INTEGER NOT NULL, "
@@ -156,6 +163,9 @@ public final class SQLiteSchema {
         addSegmentColumn(prefix, statement, "user_stats");
         addSegmentColumn(prefix, statement, "type_stats");
         addSegmentColumn(prefix, statement, "action_stats");
+        // Which entities a segment holds rows for, so the inspector can look one up without opening
+        // segments that hold nothing of it.
+        addSegmentColumn(prefix, statement, "spawn_filter");
 
         recordSchemaVersion(prefix, statement);
     }

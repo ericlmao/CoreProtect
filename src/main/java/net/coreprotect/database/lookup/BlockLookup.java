@@ -22,6 +22,7 @@ public class BlockLookup {
 
     public static String performLookup(String command, Statement statement, BlockState block, CommandSender commandSender, int offset, int page, int limit) {
         String resultText = "";
+        InspectorSource source = null;
 
         try {
             if (block == null) {
@@ -71,13 +72,16 @@ public class BlockLookup {
                 results = statement.executeQuery(query);
             }
             else {
-                query = "SELECT COUNT(*) as count from " + ConfigHandler.prefix + "block " + WorldUtils.getWidIndex("block") + "WHERE " + where + " LIMIT 1 OFFSET 0";
+                // Compressed storage as well as the live rows, so a block's whole history is shown
+                // rather than only what happened to it inside the hot window.
+                source = InspectorSource.open(statement.getConnection(), "block", worldId, x, x, z, z, checkTime);
+                query = "SELECT COUNT(*) as count from " + source.table() + " " + source.index() + "WHERE " + where + " LIMIT 1 OFFSET 0";
                 results = statement.executeQuery(query);
                 while (results.next()) {
                     count = results.getInt("count");
                 }
                 results.close();
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back FROM " + ConfigHandler.prefix + "block " + WorldUtils.getWidIndex("block") + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + page_start;
+                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back FROM " + source.table() + " " + source.index() + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + page_start;
                 results = statement.executeQuery(query);
             }
 
@@ -187,6 +191,11 @@ public class BlockLookup {
         }
         catch (Exception e) {
             ErrorReporter.report(e);
+        }
+        finally {
+            if (source != null) {
+                source.close();
+            }
         }
         return resultText;
     }

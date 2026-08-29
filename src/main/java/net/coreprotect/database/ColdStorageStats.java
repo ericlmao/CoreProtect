@@ -24,13 +24,15 @@ public final class ColdStorageStats {
     private final long coldBytes;
     private final long freeBytes;
     private final long coldRows;
+    private final long blobBytes;
     private final long blobSavedBytes;
 
-    private ColdStorageStats(long hotBytes, long coldBytes, long freeBytes, long coldRows, long blobSavedBytes) {
+    private ColdStorageStats(long hotBytes, long coldBytes, long freeBytes, long coldRows, long blobBytes, long blobSavedBytes) {
         this.hotBytes = hotBytes;
         this.coldBytes = coldBytes;
         this.freeBytes = freeBytes;
         this.coldRows = coldRows;
+        this.blobBytes = blobBytes;
         this.blobSavedBytes = blobSavedBytes;
     }
 
@@ -63,9 +65,16 @@ public final class ColdStorageStats {
     }
 
     /**
-     * The live tables hold entity data as one compressed blob per row, because it is read a row at a
-     * time and so never becomes a segment. That compression shows up as the live size going down
-     * rather than the compressed size going up, which on its own looks like data going missing.
+     * @return the bytes the packed entity data occupies, which is part of the compressed total
+     */
+    public long getBlobBytes() {
+        return blobBytes;
+    }
+
+    /**
+     * Entity data is compressed into groups rather than segments, because it is read a row at a time.
+     * Reporting what that saved makes it clear that the live size falling is compression rather than
+     * anything going missing.
      *
      * @return the bytes compressing those blobs has saved
      */
@@ -104,10 +113,21 @@ public final class ColdStorageStats {
                 }
             }
 
+            // Entity data is compressed into groups rather than segments, because it is read a row at
+            // a time. It is compressed storage all the same, and counting it anywhere else would
+            // leave it looking as though packing it away achieved nothing.
+            long blobBytes = 0;
+            try (ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data)),0) FROM " + ConfigHandler.prefix + "blob_group")) {
+                if (results.next()) {
+                    blobBytes = results.getLong(1);
+                }
+            }
+            coldBytes = coldBytes + blobBytes;
+
             long totalBytes = pageCount * pageSize;
             long freeBytes = freeList * pageSize;
             long hotBytes = Math.max(0, totalBytes - coldBytes - freeBytes);
-            return new ColdStorageStats(hotBytes, coldBytes, freeBytes, coldRows, BlobRecompressTask.savedBytes(connection));
+            return new ColdStorageStats(hotBytes, coldBytes, freeBytes, coldRows, blobBytes, BlobRecompressTask.savedBytes(connection));
         }
     }
 

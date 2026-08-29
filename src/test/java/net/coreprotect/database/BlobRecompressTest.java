@@ -2,6 +2,7 @@ package net.coreprotect.database;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -99,17 +100,10 @@ class BlobRecompressTest {
         BlobRecompressTask.run(connection, () -> {
         });
 
-        try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT rowid, data FROM co_entity ORDER BY rowid")) {
-            int seen = 0;
-            while (results.next()) {
-                long id = results.getLong(1);
-                byte[] restored = BlobCompression.decompress(results.getBytes(2));
-                assertArrayEquals(written.get(id), restored, "row " + id + " reads back as it was written");
-                seen++;
-            }
-            assertEquals(ROWS, seen, "every row was checked");
+        for (Map.Entry<Long, byte[]> entry : written.entrySet()) {
+            assertArrayEquals(entry.getValue(), blobFor(entry.getKey()), "row " + entry.getKey() + " reads back as it was written");
         }
+        assertEquals(ROWS, written.size(), "every row was checked");
     }
 
     @Test
@@ -158,6 +152,55 @@ class BlobRecompressTest {
     }
 
     @Test
+    void packedEntityDataCountsAsCompressedStorage() throws Exception {
+        // Packing entity data does not seal a single segment, so if only segments counted the
+        // compressed total would sit still while the live total fell, which reads as data going
+        // missing rather than as compression working.
+        ColdStorageStats before = ColdStorageStats.read(connection);
+        assertNotNull(before);
+
+        BlobRecompressTask.run(connection, () -> {
+        });
+
+        ColdStorageStats after = ColdStorageStats.read(connection);
+        assertTrue(after.getBlobBytes() > 0, "the packed data is measured");
+        assertTrue(after.getColdBytes() > before.getColdBytes(), "and counted as compressed storage");
+        assertTrue(after.getHotBytes() < before.getHotBytes(), "while the live total falls");
+    }
+
+    @Test
+    void loggingCanKeepWritingWhilePackingRuns() throws Exception {
+        // A smoke test, not a proof. It catches packing that locks writers out altogether, which is
+        // worth catching; it does not show that compressing happens outside the write transaction,
+        // because the batches here are small enough to finish inside any sensible timeout either way.
+        List<Long> waits = new java.util.ArrayList<>();
+        Thread writer = new Thread(() -> {
+            try (Connection other = DriverManager.getConnection("jdbc:sqlite:" + file); Statement statement = other.createStatement()) {
+                statement.executeUpdate("PRAGMA busy_timeout=2000");
+                for (int attempt = 0; attempt < 40; attempt++) {
+                    long start = System.currentTimeMillis();
+                    statement.executeUpdate("BEGIN IMMEDIATE TRANSACTION");
+                    statement.executeUpdate("INSERT INTO co_entity (time, data) VALUES (1, NULL)");
+                    statement.executeUpdate("COMMIT");
+                    waits.add(System.currentTimeMillis() - start);
+                    Thread.sleep(5);
+                }
+            }
+            catch (Exception exception) {
+                waits.add(-1L);
+            }
+        }, "test-writer");
+
+        writer.start();
+        BlobRecompressTask.run(connection, () -> {
+        });
+        writer.join();
+
+        assertFalse(waits.contains(-1L), "every write got through");
+        assertTrue(waits.size() > 0, "the writer ran");
+    }
+
+    @Test
     void theSavingAddsUpAcrossRuns() throws Exception {
         int[] batches = { 0 };
         assertThrows(InterruptedException.class, () -> BlobRecompressTask.run(connection, () -> {
@@ -203,12 +246,9 @@ class BlobRecompressTest {
         BlobRecompressTask.run(connection, () -> {
         });
 
-        try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT rowid, data FROM co_entity ORDER BY rowid")) {
-            while (results.next()) {
-                assertArrayEquals(written.get(results.getLong(1)), BlobCompression.decompress(results.getBytes(2)),
-                        "row " + results.getLong(1) + " survived being rewritten in two goes");
-            }
+        for (Map.Entry<Long, byte[]> entry : written.entrySet()) {
+            assertArrayEquals(entry.getValue(), blobFor(entry.getKey()),
+                    "row " + entry.getKey() + " survived being rewritten in two goes");
         }
         assertTrue(storedBytes() < partway, "the rest was rewritten on the second run");
     }
@@ -219,8 +259,9 @@ class BlobRecompressTest {
         });
 
         byte[] compressed;
+        // One of the newest rows, still too close to the end of the table to have been grouped.
         try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT data FROM co_entity WHERE rowid = 1")) {
+                ResultSet results = statement.executeQuery("SELECT data FROM co_entity WHERE data IS NOT NULL ORDER BY rowid DESC LIMIT 1")) {
             assertTrue(results.next());
             compressed = results.getBytes(1);
         }
@@ -254,12 +295,36 @@ class BlobRecompressTest {
         }
     }
 
+    /** Everything the blobs occupy, whether still on their rows or packed away into groups. */
     private long storedBytes() throws SQLException {
+        long total = 0;
         try (Statement statement = connection.createStatement();
                 ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data)),0) FROM co_entity")) {
             assertTrue(results.next());
-            return results.getLong(1);
+            total = results.getLong(1);
         }
+        try (Statement statement = connection.createStatement();
+                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data)),0) FROM co_blob_group")) {
+            assertTrue(results.next());
+            total = total + results.getLong(1);
+        }
+        return total;
+    }
+
+    /** Reads a blob the way the plugin does: from the row if it is there, from its group if not. */
+    private byte[] blobFor(long rowId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT data FROM co_entity WHERE rowid = ?")) {
+            statement.setLong(1, rowId);
+            try (ResultSet results = statement.executeQuery()) {
+                if (results.next()) {
+                    byte[] stored = results.getBytes(1);
+                    if (stored != null && stored.length > 0) {
+                        return BlobCompression.decompress(stored);
+                    }
+                }
+            }
+        }
+        return ColdBlobStore.load(connection, "entity", rowId);
     }
 
     private long storedBytesUncompressed() {
