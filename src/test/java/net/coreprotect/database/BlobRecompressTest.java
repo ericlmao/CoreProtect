@@ -254,7 +254,7 @@ class BlobRecompressTest {
             total = results.getLong(1);
         }
         try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data) + LENGTH(sizes)),0) FROM co_blob_group")) {
+                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data)),0) FROM co_blob_group")) {
             assertTrue(results.next());
             total = total + results.getLong(1);
         }

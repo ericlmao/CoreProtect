@@ -116,21 +116,29 @@ public final class ColdBlobStore {
      * @return the packed group, ready to be compressed and stored
      */
     static Group pack(Map<Long, byte[]> blobs, long firstRowId) {
-        ByteArrayOutputStream payload = new ByteArrayOutputStream();
-        ByteArrayOutputStream sizes = new ByteArrayOutputStream();
+        ByteArrayOutputStream frame = new ByteArrayOutputStream();
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
         boolean any = false;
 
+        // The lengths go at the head of the same frame as the blobs rather than beside it, so that
+        // they are compressed along with everything else. Kept out, they cost a byte or two a row of
+        // plain storage, which on data that compresses this well is a noticeable share of the total.
         for (int index = 0; index < GROUP_ROWS; index++) {
             byte[] blob = blobs.get(firstRowId + index);
             int length = blob == null ? 0 : blob.length;
-            writeVarint(sizes, length);
+            writeVarint(frame, length);
             if (length > 0) {
-                payload.write(blob, 0, length);
+                body.write(blob, 0, length);
                 any = true;
             }
         }
 
-        return any ? new Group(firstRowId, sizes.toByteArray(), payload.toByteArray()) : null;
+        if (!any) {
+            return null;
+        }
+        byte[] bytes = body.toByteArray();
+        frame.write(bytes, 0, bytes.length);
+        return new Group(firstRowId, frame.toByteArray());
     }
 
     /**
@@ -152,21 +160,30 @@ public final class ColdBlobStore {
             return null;
         }
 
-        // The offset is the sum of everything before it, which is why the lengths are kept together
-        // rather than alongside the blobs: reaching the tenth blob never touches the first nine.
+        // The lengths are at the head of the frame, unless the group was written when they were kept
+        // in a column of their own, in which case they are there.
+        byte[] lengths = sizes == null ? payload : sizes;
         int[] cursor = { 0 };
         int offset = 0;
         int length = 0;
-        for (int index = 0; index <= wanted; index++) {
-            offset = offset + length;
-            length = readVarint(sizes, cursor);
+        for (int index = 0; index < GROUP_ROWS; index++) {
+            int current = readVarint(lengths, cursor);
+            if (index < wanted) {
+                offset = offset + current;
+            }
+            else if (index == wanted) {
+                length = current;
+            }
         }
 
-        if (length == 0 || offset + length > payload.length) {
+        // Where the blobs start: after the lengths when they share the frame, at the beginning when
+        // they do not.
+        int start = (sizes == null ? cursor[0] : 0) + offset;
+        if (length == 0 || start + length > payload.length) {
             return null;
         }
         byte[] blob = new byte[length];
-        System.arraycopy(payload, offset, blob, 0, length);
+        System.arraycopy(payload, start, blob, 0, length);
         return blob;
     }
 
@@ -265,16 +282,14 @@ public final class ColdBlobStore {
         return (firstRowId * 8L) + tableId;
     }
 
-    /** One group of blobs, packed but not yet compressed. */
+    /** One group of blobs, their lengths at its head, packed but not yet compressed. */
     static final class Group {
         final long firstRowId;
-        final byte[] sizes;
-        final byte[] payload;
+        final byte[] frame;
 
-        private Group(long firstRowId, byte[] sizes, byte[] payload) {
+        private Group(long firstRowId, byte[] frame) {
             this.firstRowId = firstRowId;
-            this.sizes = sizes;
-            this.payload = payload;
+            this.frame = frame;
         }
     }
 

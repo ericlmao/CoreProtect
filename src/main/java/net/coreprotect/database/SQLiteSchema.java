@@ -151,7 +151,7 @@ public final class SQLiteSchema {
         // which is worked out from a row id rather than looked up.
         statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "blob_group ("
                 + "table_id INTEGER NOT NULL, first_rowid INTEGER NOT NULL, dict_id INTEGER NOT NULL, "
-                + "raw_size INTEGER NOT NULL, sizes BLOB NOT NULL, data BLOB NOT NULL, "
+                + "raw_size INTEGER NOT NULL, sizes BLOB, data BLOB NOT NULL, "
                 + "PRIMARY KEY (table_id, first_rowid)) WITHOUT ROWID;");
 
         statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "cold_flag ("

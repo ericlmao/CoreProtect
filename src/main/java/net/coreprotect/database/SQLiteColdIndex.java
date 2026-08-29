@@ -102,7 +102,7 @@ public final class SQLiteColdIndex {
         final long minTime;
         final long maxTime;
         final int[] worldIds;
-        final SegmentFilter chunkFilter;
+        final SegmentMembership chunkFilter;
         final SegmentMembership userFilter;
         final SegmentMembership typeFilter;
         final SegmentMembership spawnFilter;
@@ -110,7 +110,7 @@ public final class SQLiteColdIndex {
         final SegmentStatistics typeStats;
         final SegmentStatistics actionStats;
 
-        ColdSegment(long id, int tableId, long startRowId, long endRowId, int rowCount, long minTime, long maxTime, int[] worldIds, SegmentFilter chunkFilter, SegmentMembership userFilter, SegmentMembership typeFilter, SegmentMembership spawnFilter, SegmentStatistics userStats, SegmentStatistics typeStats, SegmentStatistics actionStats) {
+        ColdSegment(long id, int tableId, long startRowId, long endRowId, int rowCount, long minTime, long maxTime, int[] worldIds, SegmentMembership chunkFilter, SegmentMembership userFilter, SegmentMembership typeFilter, SegmentMembership spawnFilter, SegmentStatistics userStats, SegmentStatistics typeStats, SegmentStatistics actionStats) {
             this.id = id;
             this.tableId = tableId;
             this.startRowId = startRowId;
@@ -295,7 +295,7 @@ public final class SQLiteColdIndex {
                         results.getLong("min_time"),
                         results.getLong("max_time"),
                         readWorldIds(results.getBytes("wid_set")),
-                        SegmentFilter.fromBytes(results.getBytes("chunk_filter")),
+                        SegmentMembership.decode(results.getBytes("chunk_filter")),
                         SegmentMembership.decode(results.getBytes("user_filter")),
                         SegmentMembership.decode(results.getBytes("type_filter")),
                         SegmentMembership.decode(results.getBytes("spawn_filter")),

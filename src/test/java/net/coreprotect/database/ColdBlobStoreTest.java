@@ -114,7 +114,7 @@ class ColdBlobStoreTest {
         for (int index = 0; index < ColdBlobStore.GROUP_ROWS; index++) {
             long rowId = first + index;
             byte[] expected = blobs.get(rowId);
-            byte[] found = ColdBlobStore.extract(group.sizes, group.payload, first, rowId);
+            byte[] found = ColdBlobStore.extract(null, group.frame, first, rowId);
             if (expected == null) {
                 assertNull(found, "row " + rowId + " holds nothing");
             }
@@ -133,10 +133,10 @@ class ColdBlobStoreTest {
         blobs.put(63L, "last".getBytes(StandardCharsets.UTF_8));
         ColdBlobStore.Group group = ColdBlobStore.pack(blobs, 0);
 
-        assertArrayEquals("first".getBytes(StandardCharsets.UTF_8), ColdBlobStore.extract(group.sizes, group.payload, 0, 0));
-        assertNull(ColdBlobStore.extract(group.sizes, group.payload, 0, 1), "a missing row reads as nothing");
-        assertArrayEquals("sixth".getBytes(StandardCharsets.UTF_8), ColdBlobStore.extract(group.sizes, group.payload, 0, 5));
-        assertArrayEquals("last".getBytes(StandardCharsets.UTF_8), ColdBlobStore.extract(group.sizes, group.payload, 0, 63));
+        assertArrayEquals("first".getBytes(StandardCharsets.UTF_8), ColdBlobStore.extract(null, group.frame, 0, 0));
+        assertNull(ColdBlobStore.extract(null, group.frame, 0, 1), "a missing row reads as nothing");
+        assertArrayEquals("sixth".getBytes(StandardCharsets.UTF_8), ColdBlobStore.extract(null, group.frame, 0, 5));
+        assertArrayEquals("last".getBytes(StandardCharsets.UTF_8), ColdBlobStore.extract(null, group.frame, 0, 63));
     }
 
     @Test
@@ -173,7 +173,7 @@ class ColdBlobStoreTest {
 
         long grouped;
         try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data) + LENGTH(sizes)),0) FROM co_blob_group")) {
+                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data)),0) FROM co_blob_group")) {
             assertTrue(results.next());
             grouped = results.getLong(1);
         }

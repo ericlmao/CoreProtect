@@ -131,7 +131,7 @@ class BlobRecompressBenchmark {
     /** The bytes the packed groups occupy, which is where most of the blobs end up. */
     private static long groupedBytes(Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement();
-                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data) + LENGTH(sizes)),0) FROM co_blob_group")) {
+                ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(data)),0) FROM co_blob_group")) {
             return results.next() ? results.getLong(1) : 0;
         }
     }

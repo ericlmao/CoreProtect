@@ -207,7 +207,7 @@ public final class ColdRollupTask {
                 Set<Long> spawnIds = new LinkedHashSet<>();
                 for (int row = 0; row < rows.size(); row++) {
                     Object[] values = rows.getValues(row);
-                    if (spawnColumn >= 0 && values[spawnColumn] != null && spawnIds.size() <= SegmentMembership.MAXIMUM_EXACT_VALUES) {
+                    if (spawnColumn >= 0 && values[spawnColumn] != null) {
                         spawnIds.add(((Number) values[spawnColumn]).longValue());
                     }
                     if (userColumn >= 0 && values[userColumn] != null && userCounts.size() <= SegmentStatistics.MAXIMUM_VALUES) {
@@ -355,7 +355,7 @@ public final class ColdRollupTask {
                 statement.setLong(6, block.maxTime);
                 statement.setLong(7, block.minTime / SECONDS_PER_DAY);
                 statement.setBytes(8, SQLiteColdIndex.writeWorldIds(new ArrayList<>(block.worldIds)));
-                statement.setBytes(9, block.chunkFilter == null ? null : block.chunkFilter.toBytes());
+                statement.setBytes(9, SegmentMembership.encode(toArray(block.chunkKeys), SegmentFilter.CHUNK_BYTES));
                 statement.setBytes(10, SegmentMembership.encode(toArray(block.userIds)));
                 statement.setBytes(11, SegmentMembership.encode(toArray(block.typeIds)));
                 statement.setLong(12, block.actionBits);
@@ -397,7 +397,17 @@ public final class ColdRollupTask {
         }
     }
 
-    /** One block of consecutive rows, ready to be encoded. */
+    /**
+     * One block of consecutive rows, ready to be encoded.
+     *
+     * <p>
+     * The sets of distinct values are collected in full rather than stopping at the point where they
+     * would no longer be listed exactly. What is stored is decided when the segment is written, and
+     * deciding it while reading would build a filter that knew about only the values seen up to the
+     * cut off: a lookup for any of the rest would be told the segment does not hold them, and its
+     * rows would go missing. A segment holds at most 65,536 rows, so the sets are bounded anyway.
+     * </p>
+     */
     private static final class Block {
         private final List<Long> rowIds = new ArrayList<>();
         private final List<Object[]> rows = new ArrayList<>();
@@ -408,7 +418,7 @@ public final class ColdRollupTask {
         private final Map<Long, Integer> userCounts = new HashMap<>();
         private final Map<Long, Integer> typeCounts = new HashMap<>();
         private final Map<Long, Integer> actionCounts = new HashMap<>();
-        private SegmentFilter chunkFilter;
+        private final Set<Long> chunkKeys = new LinkedHashSet<>();
         private long actionBits;
         private long minTime = Long.MAX_VALUE;
         private long maxTime = Long.MIN_VALUE;
@@ -465,20 +475,16 @@ public final class ColdRollupTask {
                         int worldId = ((Number) values[layout.worldColumn]).intValue();
                         block.worldIds.add(worldId);
                         if (layout.xColumn >= 0 && layout.zColumn >= 0 && values[layout.xColumn] != null && values[layout.zColumn] != null) {
-                            if (block.chunkFilter == null) {
-                                block.chunkFilter = new SegmentFilter(SegmentFilter.CHUNK_BYTES);
-                            }
+
                             int x = ((Number) values[layout.xColumn]).intValue();
                             int z = ((Number) values[layout.zColumn]).intValue();
-                            block.chunkFilter.add(SegmentFilter.chunkKey(worldId, SegmentFilter.chunkOf(x), SegmentFilter.chunkOf(z)));
+                            block.chunkKeys.add(SegmentFilter.chunkKey(worldId, SegmentFilter.chunkOf(x), SegmentFilter.chunkOf(z)));
                         }
                     }
 
                     if (userColumn >= 0 && values[userColumn] != null) {
                         long userId = ((Number) values[userColumn]).longValue();
-                        if (block.userIds.size() <= SegmentMembership.MAXIMUM_EXACT_VALUES) {
-                            block.userIds.add(userId);
-                        }
+                        block.userIds.add(userId);
                         if (block.userCounts.size() <= SegmentStatistics.MAXIMUM_VALUES) {
                             block.userCounts.merge(userId, 1, Integer::sum);
                         }
@@ -486,15 +492,13 @@ public final class ColdRollupTask {
 
                     if (typeColumn >= 0 && values[typeColumn] != null) {
                         long typeId = ((Number) values[typeColumn]).longValue();
-                        if (block.typeIds.size() <= SegmentMembership.MAXIMUM_EXACT_VALUES) {
-                            block.typeIds.add(typeId);
-                        }
+                        block.typeIds.add(typeId);
                         if (block.typeCounts.size() <= SegmentStatistics.MAXIMUM_VALUES) {
                             block.typeCounts.merge(typeId, 1, Integer::sum);
                         }
                     }
 
-                    if (spawnColumn >= 0 && values[spawnColumn] != null && block.spawnIds.size() <= SegmentMembership.MAXIMUM_EXACT_VALUES) {
+                    if (spawnColumn >= 0 && values[spawnColumn] != null) {
                         block.spawnIds.add(((Number) values[spawnColumn]).longValue());
                     }
 

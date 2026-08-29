@@ -318,15 +318,17 @@ public final class BlobRecompressTask {
         try {
             try (PreparedStatement statement = connection.prepareStatement(insertGroup)) {
                 for (ColdBlobStore.Group group : groups) {
-                    byte[] compressed = SegmentDictionary.compress(group.payload, dictionaryId, connection);
+                    byte[] compressed = SegmentDictionary.compress(group.frame, dictionaryId, connection);
                     statement.setInt(1, tableId);
                     statement.setLong(2, group.firstRowId);
                     statement.setInt(3, dictionaryId);
-                    statement.setInt(4, group.payload.length);
-                    statement.setBytes(5, group.sizes);
+                    statement.setInt(4, group.frame.length);
+                    // The lengths travel inside the frame now, so the column that used to hold them
+                    // is left empty; groups written before that still carry theirs and still read.
+                    statement.setBytes(5, null);
                     statement.setBytes(6, compressed);
                     statement.addBatch();
-                    stored = stored + compressed.length + group.sizes.length;
+                    stored = stored + compressed.length;
                 }
                 statement.executeBatch();
             }
