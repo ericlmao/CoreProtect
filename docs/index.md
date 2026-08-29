@@ -26,6 +26,9 @@ Migrate your CoreProtect database between supported backends.
 [**Automatic Purging**](/auto-purge/)  
 Automatically remove old CoreProtect data on a daily schedule.  
 
+[**Folia Support**](/folia/)  
+How CoreProtect schedules its work on a regionised server.  
+
 [**Compatible Third-Party Plugins & Tools**](/tools-integrations/)  
 A list of plugins and tools that are compatible with CoreProtect.  
 

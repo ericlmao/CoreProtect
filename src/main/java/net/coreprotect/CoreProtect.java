@@ -9,6 +9,7 @@ import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.services.PluginInitializationService;
 import net.coreprotect.services.ShutdownService;
+import net.coreprotect.thread.Scheduler;
 import net.coreprotect.utility.Chat;
 
 /**
@@ -42,6 +43,10 @@ public final class CoreProtect extends JavaPlugin {
         // Set plugin instance and data folder path
         instance = this;
         ConfigHandler.path = this.getDataFolder().getPath() + File.separator;
+
+        // Folia hands work to the thread that owns the region it touches, so the schedulers have to
+        // be ready before any listener or task is registered.
+        Scheduler.initialize(this);
 
         // Initialize plugin using the initialization service
         boolean initialized = PluginInitializationService.initializePlugin(this);

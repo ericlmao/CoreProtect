@@ -11,6 +11,7 @@
     <skipTests>true</skipTests>
     <maven.compiler.release>11</maven.compiler.release>
     <clickhouse.version>0.9.8</clickhouse.version>
+    <folia-scheduler.version>1.0.1</folia-scheduler.version>
     <duckdb.version>1.4.5.0</duckdb.version>
     <zstd.version>1.5.7-6</zstd.version>
   </properties>
@@ -116,6 +117,10 @@
                   <pattern>com.zaxxer</pattern>
                   <shadedPattern>net.coreprotect</shadedPattern>
                 </relocation>
+                <relocation>
+                  <pattern>gg.moonrise.scheduler</pattern>
+                  <shadedPattern>net.coreprotect.folia</shadedPattern>
+                </relocation>
               </relocations>
             </configuration>
           </execution>
@@ -150,6 +155,7 @@
                     <allowedRepository>paper-repo</allowedRepository>
                     <allowedRepository>codemc-repo</allowedRepository>
                     <allowedRepository>jitpack.io</allowedRepository>
+                    <allowedRepository>moonrise-repo</allowedRepository>
                   </allowedRepositories>
                 </requireNoRepositories>
               </rules>
@@ -224,6 +230,12 @@
       <id>jitpack.io</id>
       <url>https://jitpack.io</url>
     </repository>
+    <repository>
+      <id>moonrise-repo</id>
+      <url>https://repo.moonrise.gg/repository/maven-releases/</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
   </repositories>
   <dependencies>
     <!--
@@ -232,6 +244,13 @@
     spigot-api: org.spigotmc
     bukkit: org.bukkit
     -->
+    <!-- Folia's schedulers, behind one entry point. Compiled for Java 21, which every server that
+         has regionised scheduling already runs; nothing on a server without it loads these classes. -->
+    <dependency>
+      <groupId>gg.moonrise.scheduler</groupId>
+      <artifactId>folia-scheduler</artifactId>
+      <version>${folia-scheduler.version}</version> <!-- https://repo.moonrise.gg/repository/maven-releases/ -->
+    </dependency>
     <dependency>
       <groupId>io.papermc.paper</groupId>
       <artifactId>paper-api</artifactId>
