@@ -140,6 +140,63 @@ class ColdBlobStoreTest {
     }
 
     @Test
+    void packingWorksOnADatabaseMadeBeforeTheLengthsMovedIntoTheFrame() throws Exception {
+        // The lengths used to be stored in a column of their own, declared as never empty. That
+        // declaration cannot be taken off a table that already exists, so a server upgrading from
+        // such a build still has it, and writing nothing into the column fails outright.
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("DROP TABLE co_blob_group");
+            statement.executeUpdate("CREATE TABLE co_blob_group (table_id INTEGER NOT NULL, first_rowid INTEGER NOT NULL, "
+                    + "dict_id INTEGER NOT NULL, raw_size INTEGER NOT NULL, sizes BLOB NOT NULL, data BLOB NOT NULL, "
+                    + "PRIMARY KEY (table_id, first_rowid)) WITHOUT ROWID;");
+        }
+
+        BlobRecompressTask.run(connection, () -> {
+        });
+
+        assertTrue(groupCount() > 0, "the rows were packed even so");
+        for (Map.Entry<Long, byte[]> entry : written.entrySet()) {
+            assertArrayEquals(entry.getValue(), blobFor(entry.getKey()), "row " + entry.getKey() + " reads back");
+        }
+    }
+
+    @Test
+    void groupsWrittenWithTheirLengthsBesideThemStillRead() throws Exception {
+        BlobRecompressTask.run(connection, () -> {
+        });
+
+        // What a group written by an earlier build looks like: the lengths in the column, the blobs
+        // alone in the frame. Both shapes have to read, because a database will hold a mix of them.
+        Map<Long, byte[]> blobs = new HashMap<>();
+        for (int index = 0; index < ColdBlobStore.GROUP_ROWS; index++) {
+            blobs.put((long) index, ("legacy blob " + index).getBytes(StandardCharsets.UTF_8));
+        }
+        ColdBlobStore.Group group = ColdBlobStore.pack(blobs, 0);
+
+        // Split the frame back into the two parts the old format kept apart.
+        byte[] sizes = new byte[headerLength(group.frame)];
+        System.arraycopy(group.frame, 0, sizes, 0, sizes.length);
+        byte[] payload = new byte[group.frame.length - sizes.length];
+        System.arraycopy(group.frame, sizes.length, payload, 0, payload.length);
+
+        for (int index = 0; index < ColdBlobStore.GROUP_ROWS; index++) {
+            assertArrayEquals(blobs.get((long) index), ColdBlobStore.extract(sizes, payload, 0, index),
+                    "row " + index + " reads from the old shape");
+        }
+    }
+
+    /** How many bytes of a frame the length list takes. */
+    private static int headerLength(byte[] frame) {
+        int cursor = 0;
+        for (int index = 0; index < ColdBlobStore.GROUP_ROWS; index++) {
+            while ((frame[cursor++] & 0x80) != 0) {
+                // A varint runs until a byte without its high bit set.
+            }
+        }
+        return cursor;
+    }
+
+    @Test
     void everyBlobReadsBackAfterBeingPackedAway() throws Exception {
         BlobRecompressTask.run(connection, () -> {
         });

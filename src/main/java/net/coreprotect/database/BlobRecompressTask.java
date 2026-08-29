@@ -57,6 +57,9 @@ public final class BlobRecompressTask {
     /** Blobs read to train a dictionary. At a couple of kilobytes each this is ample material. */
     private static final int SAMPLE_ROWS = 4096;
 
+    /** Stored in place of a length list that now travels inside the frame with the blobs. */
+    private static final byte[] EMPTY = new byte[0];
+
     /** Where the running total of bytes saved by compressing blobs is kept. */
     private static final String SAVED_MARKER = "blobs_saved_bytes";
 
@@ -324,8 +327,10 @@ public final class BlobRecompressTask {
                     statement.setInt(3, dictionaryId);
                     statement.setInt(4, group.frame.length);
                     // The lengths travel inside the frame now, so the column that used to hold them
-                    // is left empty; groups written before that still carry theirs and still read.
-                    statement.setBytes(5, null);
+                    // is written empty rather than as nothing: databases created before this change
+                    // declared it as never empty, and that declaration cannot be taken back off a
+                    // table that already exists. Groups written before it still carry theirs.
+                    statement.setBytes(5, EMPTY);
                     statement.setBytes(6, compressed);
                     statement.addBatch();
                     stored = stored + compressed.length;

@@ -161,8 +161,10 @@ public final class ColdBlobStore {
         }
 
         // The lengths are at the head of the frame, unless the group was written when they were kept
-        // in a column of their own, in which case they are there.
-        byte[] lengths = sizes == null ? payload : sizes;
+        // in a column of their own, in which case they are there. Nothing in that column means the
+        // frame carries them; a real list is sixty four lengths and can never be empty.
+        boolean inFrame = sizes == null || sizes.length == 0;
+        byte[] lengths = inFrame ? payload : sizes;
         int[] cursor = { 0 };
         int offset = 0;
         int length = 0;
@@ -178,7 +180,7 @@ public final class ColdBlobStore {
 
         // Where the blobs start: after the lengths when they share the frame, at the beginning when
         // they do not.
-        int start = (sizes == null ? cursor[0] : 0) + offset;
+        int start = (inFrame ? cursor[0] : 0) + offset;
         if (length == 0 || start + length > payload.length) {
             return null;
         }
