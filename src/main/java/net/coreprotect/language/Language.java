@@ -56,6 +56,7 @@ public class Language {
         phrases.put(Phrase.COMPACT_FAILED, "Compacting failed. Check the server log for details.");
         phrases.put(Phrase.COMPACT_NOTHING_TO_DO, "There was nothing left to compact.");
         phrases.put(Phrase.COMPACT_PROGRESS, "Compacting: {0}.");
+        phrases.put(Phrase.COMPACT_REBUILD_PENDING, "The file is mostly free space ({0}). It is written out afresh when the server stops, which takes minutes rather than days.");
         phrases.put(Phrase.COMPACT_STARTED, "Compacting older data into compressed storage. The server remains usable.");
         phrases.put(Phrase.COMPACT_STOPPED, "Compacting stopped early. The remaining data is packed on the next run.");
         phrases.put(Phrase.COMPACT_UNSUPPORTED, "Compressed storage is only used by SQLite. This server uses {0}.");

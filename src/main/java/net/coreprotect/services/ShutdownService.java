@@ -10,6 +10,7 @@ import org.bukkit.plugin.Plugin;
 
 import net.coreprotect.command.PurgeCommand;
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.database.DatabaseRebuild;
 import net.coreprotect.consumer.Consumer;
 import net.coreprotect.consumer.process.Process;
 import net.coreprotect.language.Phrase;
@@ -88,6 +89,10 @@ public class ShutdownService {
             }
 
             ConfigHandler.performDisable();
+            // With every connection closed and nothing left to log, a file that is mostly free space
+            // is written out afresh. This is the only moment it can be replaced without losing
+            // anything written since the copy was made.
+            DatabaseRebuild.runAfterClose();
             Chat.console(Phrase.build(Phrase.DISABLE_SUCCESS, "CoreProtect v" + plugin.getDescription().getVersion()));
         }
         catch (Exception e) {

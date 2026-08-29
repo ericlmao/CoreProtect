@@ -114,6 +114,7 @@ public class Config extends Language {
     public int HOT_BLOB_COMPRESSION_LEVEL;
     public int COLD_MAX_ROWS;
     public int COMPACT_THREADS;
+    public boolean COMPACT_REBUILD;
     public long HOT_WINDOW_SECONDS;
     public int DEFAULT_RADIUS;
     public int DUCKDB_THREADS;
@@ -284,6 +285,8 @@ public class Config extends Language {
         this.COLD_MAX_ROWS = Math.max(10000, this.getInt("cold-max-rows", 1000000));
         // Cores used for the compressing a compact does. Nought means as many as are spare.
         this.COMPACT_THREADS = Math.max(0, this.getInt("compact-threads", 0));
+        // Whether a file that is mostly free space is written out afresh when the server stops.
+        this.COMPACT_REBUILD = this.getBoolean("compact-rebuild", true);
         this.CHECK_UPDATES = this.getBoolean("check-updates");
         this.ERROR_REPORTING = this.getBoolean("error-reporting");
         this.API_ENABLED = this.getBoolean("api-enabled");

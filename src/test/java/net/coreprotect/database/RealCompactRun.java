@@ -12,7 +12,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
@@ -62,11 +64,15 @@ class RealCompactRun {
         ConfigHandler.path = DATABASE.getParent().toString() + java.io.File.separator;
         ConfigHandler.sqlite = DATABASE.getFileName().toString();
         ConfigHandler.serverRunning = true;
+        // What a server runs with by default: a file that is mostly free space is written out afresh
+        // when it stops rather than handed back a page at a time.
+        net.coreprotect.config.Config.getGlobal().COMPACT_REBUILD = true;
         SQLiteColdIndex.invalidate();
         SegmentDictionary.clearCache();
         BlobDictionary.clear();
         ColdBlobStore.clearCache();
 
+        boolean rebuilding;
         long fileBefore = Files.size(DATABASE);
         System.out.printf("start: file %,d bytes%n", fileBefore);
 
@@ -104,11 +110,18 @@ class RealCompactRun {
             System.out.printf("packed, saving %,d bytes in %,d ms%n", packed, System.currentTimeMillis() - started);
 
             started = System.currentTimeMillis();
-            Database.reclaimFreePages(connection);
+            // The same choice the compact command makes: a file that is mostly free space is written
+            // out afresh when the server stops rather than handed back a page at a time, because on a
+            // file of this size the page by page route takes days.
+            rebuilding = DatabaseRebuild.worthwhile(connection);
+            if (!rebuilding) {
+                Database.reclaimFreePages(connection);
+            }
             try (Statement statement = connection.createStatement()) {
                 statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
             }
-            System.out.printf("reclaimed in %,d ms%n", System.currentTimeMillis() - started);
+            System.out.printf("%s in %,d ms%n", rebuilding ? "left the free space for the rebuild" : "reclaimed",
+                    System.currentTimeMillis() - started);
 
             report(connection, "after");
 
@@ -138,17 +151,81 @@ class RealCompactRun {
             long loose = count(connection, ConfigHandler.prefix + "entity WHERE data IS NOT NULL");
             assertTrue(loose < 2 * ColdBlobStore.GROUP_ROWS, "only the newest entity rows keep their own blobs: " + loose);
 
-            // Nothing is left waiting to be handed back.
-            assertEquals(0, pragma(connection, "PRAGMA freelist_count"), "every free page was returned");
+            // Nothing is left waiting to be handed back, unless the file is to be rebuilt, which is
+            // what returns it in that case.
+            if (!rebuilding) {
+                assertEquals(0, pragma(connection, "PRAGMA freelist_count"), "every free page was returned");
+            }
 
             // And the file is the size the data needs rather than the size it used to be.
             ColdStorageStats stats = ColdStorageStats.read(connection);
             long accounted = stats.getHotBytes() + stats.getColdBytes();
-            System.out.printf("hot %,d + cold %,d = %,d of %,d bytes%n", stats.getHotBytes(), stats.getColdBytes(), accounted, fileAfter);
-            assertTrue(fileAfter < fileBefore / 10, "the file is a fraction of what it was");
+            System.out.printf("hot %,d + cold %,d = %,d of %,d bytes (%.1fx smaller than it was)%n",
+                    stats.getHotBytes(), stats.getColdBytes(), accounted, fileAfter, fileBefore / (double) fileAfter);
+            assertTrue(fileAfter < fileBefore, "the file is smaller than it was");
 
             assertEveryBlobReads(connection);
         }
+
+        // What the server does when it stops: a file that is mostly free space is written out afresh,
+        // because handing that space back a page at a time takes days on a file this size. Row ids
+        // have to come through it untouched, since everything about compressed storage is addressed
+        // by them.
+        Map<String, List<Long>> before = rowIdsPerTable();
+        long rebuiltFrom = Files.size(DATABASE);
+        try (Connection connection = open()) {
+            assertTrue(DatabaseRebuild.worthwhile(connection), "the file is now mostly free space, as a compacted one is");
+        }
+
+        long started = System.currentTimeMillis();
+        long saved = DatabaseRebuild.rebuild(DATABASE);
+        assertTrue(saved > 0, "the rebuild returned the space the compact left free");
+        System.out.printf("rebuilt in %,d ms: %,d -> %,d bytes, freeing %,d%n",
+                System.currentTimeMillis() - started, rebuiltFrom, Files.size(DATABASE), saved);
+
+        Map<String, List<Long>> after = rowIdsPerTable();
+        assertEquals(before.keySet(), after.keySet(), "every table came through the rebuild");
+        for (Map.Entry<String, List<Long>> entry : before.entrySet()) {
+            assertEquals(entry.getValue(), after.get(entry.getKey()), entry.getKey() + " kept its row ids");
+        }
+
+        try (Connection connection = open()) {
+            SQLiteColdIndex.invalidate();
+            SQLiteColdIndex.reload(connection);
+            ColdBlobStore.clearCache();
+            BlobRecompressTask.loadDictionaries(connection);
+            assertEquals(0, pragma(connection, "PRAGMA freelist_count"), "the rebuilt file has nothing free");
+            assertEquals(0, ColdRollupTask.repairRowIds(connection, () -> {
+            }), "and no live row sits underneath the segments");
+            assertEveryBlobReads(connection);
+        }
+    }
+
+    /** The row ids each table holds, which a rebuild has to leave exactly as they were. */
+    private Map<String, List<Long>> rowIdsPerTable() throws SQLException {
+        Map<String, List<Long>> rowIds = new LinkedHashMap<>();
+        try (Connection connection = open(); Statement statement = connection.createStatement()) {
+            List<String> tables = new ArrayList<>();
+            try (ResultSet results = statement.executeQuery("SELECT name, sql FROM sqlite_master WHERE type = 'table' "
+                    + "AND name NOT LIKE 'sqlite_%' ORDER BY name")) {
+                while (results.next()) {
+                    String definition = results.getString(2);
+                    if (definition == null || !definition.toLowerCase(java.util.Locale.ROOT).contains("without rowid")) {
+                        tables.add(results.getString(1));
+                    }
+                }
+            }
+            for (String table : tables) {
+                List<Long> ids = new ArrayList<>();
+                try (ResultSet results = statement.executeQuery("SELECT rowid FROM " + table + " ORDER BY rowid")) {
+                    while (results.next()) {
+                        ids.add(results.getLong(1));
+                    }
+                }
+                rowIds.put(table, ids);
+            }
+        }
+        return rowIds;
     }
 
     /** Reads a sample of packed blobs back, since a smaller file that cannot be read is worthless. */

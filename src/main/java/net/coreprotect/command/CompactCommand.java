@@ -15,6 +15,7 @@ import net.coreprotect.database.ColdRollupTask;
 import net.coreprotect.database.ColdStorageStats;
 import net.coreprotect.database.CompactProgress;
 import net.coreprotect.database.Database;
+import net.coreprotect.database.DatabaseRebuild;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
 import net.coreprotect.utility.Chat;
@@ -199,8 +200,17 @@ public class CompactCommand {
      */
     private static void reclaimSpace(Connection connection, CommandSender player) {
         try {
-            CompactProgress.set("returning freed space", 0, 0);
-            Database.reclaimFreePages(connection, () -> tick(player));
+            if (DatabaseRebuild.worthwhile(connection)) {
+                // Handing pages back one at a time is hopeless once most of the file is free space:
+                // every page still holding data has to be moved out of the end of the file first. The
+                // file is written out afresh when the server stops instead, which costs one pass over
+                // the data rather than a shuffle of everything that is not there any more.
+                Chat.sendGlobalMessage(player, Phrase.build(Phrase.COMPACT_REBUILD_PENDING, ColdStorageStats.format(freeBytes(connection))));
+            }
+            else {
+                CompactProgress.set("returning freed space", 0, 0);
+                Database.reclaimFreePages(connection, () -> tick(player));
+            }
             CompactProgress.set("emptying the write ahead log", 0, 0);
             try (Statement statement = connection.createStatement()) {
                 statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -209,6 +219,21 @@ public class CompactCommand {
         catch (SQLException e) {
             // The space is reused by future writes even when it cannot be returned right now.
             ErrorReporter.report(e);
+        }
+    }
+
+    /** How much of the file is free space, for saying so. */
+    private static long freeBytes(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            long pageSize = 0;
+            long free = 0;
+            try (java.sql.ResultSet results = statement.executeQuery("PRAGMA page_size")) {
+                pageSize = results.next() ? results.getLong(1) : 0;
+            }
+            try (java.sql.ResultSet results = statement.executeQuery("PRAGMA freelist_count")) {
+                free = results.next() ? results.getLong(1) : 0;
+            }
+            return pageSize * free;
         }
     }
 

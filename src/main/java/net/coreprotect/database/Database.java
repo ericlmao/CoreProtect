@@ -366,6 +366,14 @@ public class Database extends Queue {
      *             if the pages cannot be returned
      */
     public static void reclaimFreePages(Connection connection, ColdRollupTask.Callback stop, long maximumPages) throws SQLException {
+        if (DatabaseRebuild.worthwhile(connection)) {
+            // Past a certain amount there is no point handing pages back one at a time: each page
+            // still holding data has to be moved out of the end of the file before the end can be
+            // dropped, which on a file that is mostly free space is days of work. That much free
+            // space is returned by writing the file out afresh when the server stops instead.
+            return;
+        }
+
         boolean autoCommit = connection.getAutoCommit();
         if (!autoCommit) {
             connection.commit();
