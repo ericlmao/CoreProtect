@@ -607,9 +607,8 @@ public class Rollback extends RollbackUtil {
     private static CompletableFuture<Boolean> scheduleFoliaChunkBatchTask(FoliaRollbackBatchState batchState, int rollbackType, int preview, String userString, CommandSender user, boolean inventoryRollback, boolean verbose, List<Integer> actionList, RollbackBlockDataCache blockDataCache, EntitySpawnRollbackHandler.Context entitySpawnContext) {
         CompletableFuture<Boolean> future = new CompletableFuture<>();
         FoliaChunkWork firstWork = batchState.peek();
-        Location chunkLocation = new Location(firstWork.world, (firstWork.chunkX << 4), 0, (firstWork.chunkZ << 4));
 
-        Scheduler.scheduleSyncDelayedTask(CoreProtect.getInstance(), () -> {
+        Scheduler.scheduleForChunk(CoreProtect.getInstance(), () -> {
             try {
                 long batchStart = System.nanoTime();
                 do {
@@ -638,7 +637,7 @@ public class Rollback extends RollbackUtil {
                 ErrorReporter.report(e);
                 future.complete(false);
             }
-        }, chunkLocation, 0);
+        }, firstWork.world, firstWork.chunkX, firstWork.chunkZ, 0);
 
         return future;
     }
