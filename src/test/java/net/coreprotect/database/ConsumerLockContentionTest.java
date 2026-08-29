@@ -2,6 +2,7 @@ package net.coreprotect.database;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -232,6 +233,32 @@ class ConsumerLockContentionTest {
         try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery("PRAGMA freelist_count")) {
             assertTrue(results.next());
             return results.getLong(1);
+        }
+    }
+
+    /**
+     * A lock held by something else has to be waited for rather than reported. During a compact it is
+     * held most of the time, and a stack trace every few seconds says nothing a retry does not.
+     */
+    @Test
+    void aLockedDatabaseIsRecognisedForWhatItIs() throws Exception {
+        try (Connection holder = open(0); Connection blocked = open(0)) {
+            try (Statement statement = holder.createStatement()) {
+                statement.executeUpdate("BEGIN IMMEDIATE TRANSACTION");
+            }
+
+            SQLException refused = assertThrows(SQLException.class, () -> {
+                try (Statement statement = blocked.createStatement()) {
+                    statement.executeUpdate("BEGIN IMMEDIATE TRANSACTION");
+                }
+            });
+
+            assertTrue(Database.isLocked(refused), "a refusal for want of the lock is told apart from a real fault");
+            assertFalse(Database.isLocked(new SQLException("no such table: co_block")), "and from anything else");
+
+            try (Statement statement = holder.createStatement()) {
+                statement.executeUpdate("ROLLBACK");
+            }
         }
     }
 

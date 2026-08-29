@@ -766,15 +766,37 @@ public class Process {
         updates.clear();
     }
 
+    /** Attempts at starting the transaction before the batch is left for the next pass. */
+    private static final int BEGIN_ATTEMPTS = 5;
+
     private static boolean beginConsumerTransaction(ConsumerWriteBatch batch) {
-        try {
-            batch.begin();
-            return true;
+        for (int attempt = 1; attempt <= BEGIN_ATTEMPTS; attempt++) {
+            try {
+                batch.begin();
+                return true;
+            }
+            catch (Exception e) {
+                if (!Database.isLocked(e)) {
+                    ErrorReporter.report(e);
+                    return false;
+                }
+
+                // Something else is writing, which during a compact is most of the time. Waiting for
+                // it is ordinary, so it is waited for rather than reported: the batch is kept either
+                // way, and a stack trace every few seconds says nothing that a retry does not.
+                if (attempt == BEGIN_ATTEMPTS) {
+                    return false;
+                }
+                try {
+                    Thread.sleep(attempt * 200L);
+                }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
         }
-        catch (Exception e) {
-            ErrorReporter.report(e);
-            return false;
-        }
+        return false;
     }
 
     static void preflightUsers(ConsumerWriteBatch batch, List<Object[]> consumerData,

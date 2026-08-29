@@ -386,10 +386,17 @@ public class Database extends Queue {
             long returned = 0;
             while (free > 0 && free < previous && returned < maximumPages) {
                 long batch = Math.min(Math.min(free, RECLAIM_PAGES), maximumPages - returned);
+                long started = System.currentTimeMillis();
                 statement.executeUpdate("PRAGMA incremental_vacuum(" + batch + ")");
                 previous = free;
                 free = freePages(statement);
                 returned = returned + batch;
+
+                // Stand back before asking for the write lock again. Each of these is a write
+                // transaction, and SQLite does not hand the lock out in turn: taking it back the
+                // instant it is released keeps anything else waiting out for as long as this runs,
+                // however short each transaction is. After a large compact this runs for minutes.
+                yieldWriteLock(System.currentTimeMillis() - started);
                 if (stop != null) {
                     try {
                         stop.beforeSegment();
@@ -407,6 +414,21 @@ public class Database extends Queue {
 
     /** Pages handed back per call, so the write lock is never held for long. */
     private static final int RECLAIM_PAGES = 4000;
+
+    /**
+     * Waits a moment so another writer can take the lock.
+     *
+     * @param workMilliseconds
+     *            how long the work just finished took
+     */
+    private static void yieldWriteLock(long workMilliseconds) {
+        try {
+            Thread.sleep(Math.max(1, Math.min(workMilliseconds, 25)));
+        }
+        catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+    }
 
     private static long freePages(Statement statement) throws SQLException {
         try (ResultSet results = statement.executeQuery("PRAGMA freelist_count")) {
@@ -624,7 +646,31 @@ public class Database extends Queue {
         if (dataSource != null && !dataSource.isClosed()) {
             return dataSource.getConnection();
         }
-        return DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+        // Opened without the pool, and so without anything the pool would have set. A connection
+        // with no time to wait for a lock gives up the instant anything else is writing.
+        Connection connection = DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("PRAGMA busy_timeout=30000");
+            statement.executeUpdate("PRAGMA temp_store=FILE");
+        }
+        return connection;
+    }
+
+    /**
+     * @param failure
+     *            something thrown by a database call
+     * @return true when it failed only because something else was writing
+     */
+    public static boolean isLocked(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && (message.contains("database is locked") || message.contains("SQLITE_BUSY"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     public static void closeConnection() {
