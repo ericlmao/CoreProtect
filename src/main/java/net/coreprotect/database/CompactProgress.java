@@ -76,6 +76,31 @@ public final class CompactProgress {
     }
 
     /**
+     * A length of time in words, short enough to sit at the end of a progress line.
+     *
+     * <p>
+     * Rounded to the largest two units that say anything, so an hour long wait reads as hours and
+     * minutes rather than as thousands of seconds.
+     * </p>
+     *
+     * @param milliseconds
+     *            how long
+     * @return the same, in words
+     */
+    public static String duration(long milliseconds) {
+        long seconds = Math.max(0, milliseconds) / 1000L;
+        long hours = seconds / 3600L;
+        long minutes = (seconds % 3600L) / 60L;
+        if (hours > 0) {
+            return hours + "h " + minutes + "m";
+        }
+        if (minutes > 0) {
+            return minutes + "m " + (seconds % 60L) + "s";
+        }
+        return seconds > 0 ? seconds + "s" : "<1s";
+    }
+
+    /**
      * @return what to tell an operator, or null when nothing is being done
      */
     public static String line() {

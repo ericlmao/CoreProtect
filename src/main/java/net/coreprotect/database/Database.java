@@ -386,6 +386,7 @@ public class Database extends Queue {
             long free = freePages(statement);
             long outstanding = free;
             long returned = 0;
+            long begun = System.currentTimeMillis();
             while (free > 0 && free < previous && returned < maximumPages) {
                 long batch = Math.min(Math.min(free, RECLAIM_PAGES), maximumPages - returned);
                 long started = System.currentTimeMillis();
@@ -399,7 +400,8 @@ public class Database extends Queue {
                 // instant it is released keeps anything else waiting out for as long as this runs,
                 // however short each transaction is. After a large compact this runs for minutes.
                 CompactProgress.set("returning freed space", ColdStorageStats.format((outstanding - free) * pageSize)
-                        + " of " + ColdStorageStats.format(outstanding * pageSize));
+                        + " of " + ColdStorageStats.format(outstanding * pageSize)
+                        + remaining(begun, outstanding - free, free));
                 yieldWriteLock(System.currentTimeMillis() - started);
                 if (stop != null) {
                     try {
@@ -428,6 +430,31 @@ public class Database extends Queue {
      * </p>
      */
     private static final int RECLAIM_PAGES = 32000;
+
+    /**
+     * How long the rest of a run of pages is likely to take, in words.
+     *
+     * <p>
+     * Pages go back at a steady rate, so what has been returned so far and how long it took says
+     * what the rest will cost. It is left off until enough has been done for that rate to mean
+     * anything, since an estimate from the first second of a job that runs for an hour is noise.
+     * </p>
+     *
+     * @param begun
+     *            when the run started
+     * @param done
+     *            pages returned so far
+     * @param left
+     *            pages still to return
+     * @return something to append to the progress line, or an empty string when it is too early
+     */
+    static String remaining(long begun, long done, long left) {
+        long elapsed = System.currentTimeMillis() - begun;
+        if (done <= 0 || left <= 0 || elapsed < 2000) {
+            return "";
+        }
+        return ", " + CompactProgress.duration((long) (elapsed * (left / (double) done))) + " left";
+    }
 
     /**
      * Waits a moment so another writer can take the lock.

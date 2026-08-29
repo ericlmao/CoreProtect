@@ -136,6 +136,29 @@ class CompactProgressTest {
     }
 
     @Test
+    void aWaitIsSaidInUnitsSomebodyWouldUse() {
+        assertEquals("45s", CompactProgress.duration(45_000));
+        assertEquals("1m 30s", CompactProgress.duration(90_000));
+        assertEquals("2h 14m", CompactProgress.duration((2 * 3600 + 14 * 60) * 1000L));
+        assertEquals("<1s", CompactProgress.duration(400));
+        assertEquals("<1s", CompactProgress.duration(-1));
+    }
+
+    @Test
+    void howLongIsLeftComesFromHowLongTheDoneWorkTook() {
+        // A quarter of the pages in ten seconds means thirty seconds for the other three quarters.
+        long begun = System.currentTimeMillis() - 10_000;
+        assertEquals(", 30s left", Database.remaining(begun, 250, 750));
+
+        // Nothing is claimed from a first batch, since a rate off one second of a job that runs for
+        // an hour would be noise.
+        assertEquals("", Database.remaining(System.currentTimeMillis() - 500, 250, 750));
+
+        // Nor when there is nothing left to wait for.
+        assertEquals("", Database.remaining(begun, 1000, 0));
+    }
+
+    @Test
     void reclaimingSpaceReportsSomethingThatMoves() throws Exception {
         // Enough pages that a percentage would round to nothing for the first several batches.
         try (Statement statement = connection.createStatement()) {
