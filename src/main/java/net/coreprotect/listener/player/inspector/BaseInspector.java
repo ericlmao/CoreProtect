@@ -16,6 +16,10 @@ public abstract class BaseInspector {
             throw new InspectionException(Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.UPGRADE_IN_PROGRESS));
         }
 
+        if (ConfigHandler.migrationRunning) {
+            throw new InspectionException(Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.IMPORT_IN_PROGRESS));
+        }
+
         if (ConfigHandler.purgeRunning) {
             throw new InspectionException(Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.PURGE_IN_PROGRESS));
         }

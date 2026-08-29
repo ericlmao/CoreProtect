@@ -11,6 +11,7 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.utility.serialize.BlobCompression;
 
 public class DatabaseUtils {
 
@@ -48,6 +49,22 @@ public class DatabaseUtils {
         byte[] binary = new byte[value.length - 1];
         System.arraycopy(value, 1, binary, 0, binary.length);
         return binary;
+    }
+
+    /**
+     * Reads a serialized blob column, transparently decompressing it when it was stored
+     * with Zstandard compression enabled.
+     *
+     * @param resultSet
+     *            the result set positioned on the row to read
+     * @param column
+     *            the blob column to read
+     * @return the blob contents in their uncompressed form
+     * @throws SQLException
+     *             if the column cannot be read
+     */
+    public static byte[] getBlobBytes(ResultSet resultSet, String column) throws SQLException {
+        return BlobCompression.decompress(getBytes(resultSet, column));
     }
 
     public static String caseInsensitiveEquals(String column) {

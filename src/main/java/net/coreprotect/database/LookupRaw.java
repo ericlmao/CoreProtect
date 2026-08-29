@@ -28,6 +28,7 @@ import net.coreprotect.database.statement.EntitySpawnStatement;
 import net.coreprotect.database.statement.UserStatement;
 import net.coreprotect.listener.channel.PluginChannelHandshakeListener;
 import net.coreprotect.model.action.EntityActionFilter;
+import net.coreprotect.language.Phrase;
 import net.coreprotect.model.action.LookupActions;
 import net.coreprotect.model.action.SignActions;
 import net.coreprotect.model.item.InventorySources;
@@ -37,6 +38,8 @@ import net.coreprotect.model.lookup.LookupCursor;
 import net.coreprotect.model.lookup.LookupRollbackState;
 import net.coreprotect.utility.EntitySpawnTracking;
 import net.coreprotect.utility.EntityUtils;
+import net.coreprotect.utility.Chat;
+import net.coreprotect.utility.Color;
 import net.coreprotect.utility.ErrorReporter;
 import net.coreprotect.utility.DatabaseUtils;
 import net.coreprotect.utility.MaterialUtils;
@@ -148,6 +151,66 @@ public class LookupRaw extends Queue {
         return performLookupRaw(statement, user, checkUuids, checkUsers, restrictList, excludeList, excludeUserList, actionList, entityActionFilter, messageFilters, entityContext, location, radius, rowData, startTime, endTime, limitOffset, limitCount, restrictWorld, lookup, entityContainerId, rollbackState, null, true);
     }
 
+    /**
+     * Works out how many rows a query can possibly display, which is the most the compressed
+     * storage ever has to read for it. Counts and summaries need every matching row, and a query
+     * fetching specific row ids has already been told exactly what to read.
+     *
+     * @param pageRows
+     *            specific row ids being fetched, or null
+     * @param limitOffset
+     *            the offset of the page being shown
+     * @param limitCount
+     *            how many rows the page shows, or -1 when unlimited
+     * @param count
+     *            true when the query is a count
+     * @param summary
+     *            true when the query is a summary
+     * @param selectPageRows
+     *            true when the query is collecting row ids for later pages
+     * @return the row budget, or 0 for no limit
+     */
+    private static long pageBudget(Map<Integer, List<Long>> pageRows, int limitOffset, int limitCount, boolean count, boolean summary, boolean selectPageRows) {
+        if (pageRows != null || count || summary || selectPageRows || limitCount <= 0) {
+            return 0;
+        }
+        if (Boolean.TRUE.equals(RETRYING_WITHOUT_BUDGET.get())) {
+            return 0;
+        }
+        return (long) Math.max(0, limitOffset) + limitCount;
+    }
+
+    /**
+     * @param actionList
+     *            the actions the lookup covers
+     * @param queryTable
+     *            the table a single table lookup would read
+     * @return the tables the query merges, or one table when it does not merge
+     */
+    private static String[] unionTables(List<Integer> actionList, boolean lookup, String queryTable) {
+        if (actionList.contains(LookupActions.CHAT) && actionList.contains(LookupActions.COMMAND)) {
+            return new String[] { "chat", "command" };
+        }
+
+        // These are the same conditions the query below builds its branches from, so the plan
+        // always covers exactly the tables the results are merged from.
+        boolean inventoryQuery = LookupActions.isInventoryLookup(actionList);
+        boolean readsBlocks = (lookup && actionList.isEmpty()) || (inventoryQuery && !actionList.contains(LookupActions.BLOCK_BREAK));
+        if (readsBlocks && inventoryQuery) {
+            return new String[] { "block", "container", "entity_container", "item" };
+        }
+        if (readsBlocks) {
+            return new String[] { "block", "container", "entity_container", "item" };
+        }
+        if (inventoryQuery) {
+            return new String[] { "container", "entity_container", "item" };
+        }
+        return new String[] { queryTable };
+    }
+
+    /** Set while a lookup is being repeated without a page budget, so it is only repeated once. */
+    private static final ThreadLocal<Boolean> RETRYING_WITHOUT_BUDGET = new ThreadLocal<>();
+
     private static List<Object[]> performLookupRaw(Statement statement, CommandSender user, List<String> checkUuids, List<String> checkUsers, List<Object> restrictList, Map<Object, Boolean> excludeList, List<String> excludeUserList, List<Integer> actionList, EntityActionFilter entityActionFilter, List<String> messageFilters, EntityLookupContext entityContext, Location location, Integer[] radius, Long[] rowData, long startTime, long endTime, int limitOffset, int limitCount, boolean restrictWorld, boolean lookup, Integer entityContainerId, LookupRollbackState rollbackState, Map<Integer, List<Long>> pageRows, boolean managePause) {
         List<Object[]> list = new ArrayList<>();
         List<Integer> invalidRollbackActions = new ArrayList<>();
@@ -173,6 +236,11 @@ public class LookupRaw extends Queue {
                 Consumer.isPaused = true;
                 paused = true;
             }
+
+            // A page can only show the newest rows, so the compressed storage is told how many it
+            // needs. If the query then rejects enough of them that the page would come up short,
+            // the lookup is repeated without that limit.
+            long pageBudget = pageBudget(pageRows, limitOffset, limitCount, false, false, false);
 
             ResultSet results = rawLookupResultSet(statement, user, checkUuids, checkUsers, restrictList, excludeList, excludeUserList, actionList, entityActionFilter, messageFilters, entityContext, location, radius, rowData, startTime, endTime, limitOffset, limitCount, restrictWorld, lookup, false, entityContainerId, false, false, false, rollbackState, pageRows, false);
             if (results == null) {
@@ -311,14 +379,14 @@ public class LookupRaw extends Queue {
                     if ((lookup && actionList.size() == 0) || actionList.contains(LookupActions.INTERACTION) || actionList.contains(LookupActions.CONTAINER) || actionList.contains(5) || actionList.contains(LookupActions.ITEM)) {
                         resultData = results.getInt("data");
                         resultAmount = results.getInt("amount");
-                        resultMeta = DatabaseUtils.getBytes(results, "metadata");
+                        resultMeta = DatabaseUtils.getBlobBytes(results, "metadata");
                         resultTable = results.getInt("tbl");
                         resultEntitySpawnId = results.getInt("entity_spawn_rowid");
                         hasTbl = true;
                     }
                     else {
                         resultData = results.getInt("data");
-                        resultMeta = DatabaseUtils.getBytes(results, "meta");
+                        resultMeta = DatabaseUtils.getBlobBytes(results, "meta");
                         resultBlockData = DatabaseUtils.getBytes(results, "blockdata");
                     }
 
@@ -336,17 +404,60 @@ public class LookupRaw extends Queue {
                 }
             }
             results.close();
+
+            if (SQLiteColdIndex.isOutOfReach()) {
+                // The page reaches further back than a single lookup is allowed to read. Say so
+                // rather than returning a page that would silently be missing rows.
+                Chat.sendMessage(user, Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.LOOKUP_PAGE_OUT_OF_REACH));
+                return new ArrayList<>();
+            }
+
+            // A page returns at most the rows it displays, never the offset as well, so a full page
+            // is limitCount rows. Comparing against the budget would treat every later page as
+            // short and re-read the whole history.
+            if (pageBudget > 0 && SQLiteColdIndex.wasTruncated() && list.size() < limitCount) {
+                SQLiteColdIndex.debug("page came up short (" + list.size() + " of " + limitCount + "), reading everything");
+                // The compressed rows that were read did not fill the page, so read them all. The
+                // flag keeps this to a single retry.
+                RETRYING_WITHOUT_BUDGET.set(Boolean.TRUE);
+                try {
+                    return performLookupRaw(statement, user, checkUuids, checkUsers, restrictList, excludeList, excludeUserList, actionList, entityActionFilter, messageFilters, entityContext, location, radius, rowData, startTime, endTime, limitOffset, limitCount, restrictWorld, lookup, entityContainerId, rollbackState, pageRows, false);
+                }
+                finally {
+                    RETRYING_WITHOUT_BUDGET.remove();
+                }
+            }
         }
         catch (Exception e) {
             ErrorReporter.report(e);
-            return null;
+            // Returning nothing at all leaves the caller to fail on it, so the lookup says it could
+            // not be completed and returns an empty result instead.
+            Chat.sendMessage(user, Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.LOOKUP_FAILED));
+            return new ArrayList<>();
         }
         finally {
+            releaseColdRows(statement);
             if (paused && !Consumer.isPersistenceHalted()) {
                 Consumer.isPaused = false;
             }
         }
         return list;
+    }
+
+    /**
+     * Drops anything a lookup decoded out of compressed storage. Called once the results have been
+     * read, since the query reads from those rows.
+     *
+     * @param statement
+     *            the statement the lookup ran on
+     */
+    private static void releaseColdRows(Statement statement) {
+        try {
+            SQLiteColdIndex.endLookup(statement == null ? null : statement.getConnection());
+        }
+        catch (Exception exception) {
+            ErrorReporter.report(exception);
+        }
     }
 
     static final class RawLookupPage {
@@ -439,6 +550,11 @@ public class LookupRaw extends Queue {
         ResultSet results = null;
 
         try {
+            SQLiteColdIndex.beginLookup(startTime, endTime);
+            // Both of these have to be set after the lookup context exists, or they are thrown away.
+            SQLiteColdIndex.setRowBudget(pageBudget(pageRows, limitOffset, limitCount, count, summary, selectPageRows));
+            // Planning is switched on further down, immediately before the one query shape whose
+            // offset is adjusted to match. Every other shape leaves it off.
             Set<UUID> loadedEntityUuids = entityContext.getLoadedEntityUuids();
             Set<UUID> loadedEntityCandidates = entityContext.getLoadedEntityCandidates();
             List<Integer> validActions = Arrays.asList(LookupActions.BLOCK_BREAK, LookupActions.BLOCK_PLACE, LookupActions.INTERACTION, LookupActions.ENTITY_KILL, LookupActions.ENTITY_SPAWN);
@@ -822,20 +938,29 @@ public class LookupRaw extends Queue {
                 }
             }
 
-            if (radius == null && actionList.contains(5) && entityContainerId == null) {
-                int worldId = locationWorldId;
-                int x = sourceBounds[1];
-                int z = sourceBounds[5];
-                int x2 = sourceBounds[2];
-                int z2 = sourceBounds[6];
-
-                queryBlock = queryBlock + " wid=" + worldId + " AND (x = " + x + " OR x = " + x2 + ") AND (z = " + z + " OR z = " + z2 + ") AND y = " + location.getBlockY() + " AND";
-            }
+            // The compressed reader evaluates world, coordinates, time, user, type and action
+            // itself. Anything else in the query means it cannot be trusted to count on its own,
+            // and this is decided from the request rather than from the assembled query so that a
+            // deep page can be planned before any of it is built.
+            boolean unmodelledPredicate = (validAction && entityActionFilter != EntityActionFilter.DEFAULT)
+                    || uuids.length() > 0
+                    || (messageFilters != null && !messageFilters.isEmpty())
+                    || (rollbackState != null && rollbackState != LookupRollbackState.ANY)
+                    || actionList.contains(LookupActions.SIGN)
+                    || (radius == null && actionList.contains(5) && entityContainerId == null);
 
             String actionPredicate = "";
+            String modelledActions = null;
             if (validAction) {
                 actionPredicate = buildActionPredicate(action, actionList, entityActionFilter);
                 queryBlock = queryBlock + " " + actionPredicate + " AND";
+                if (entityActionFilter == EntityActionFilter.DEFAULT) {
+                    // A plain list of actions is something the compressed reader can apply itself.
+                    modelledActions = action;
+                }
+                else {
+                    unmodelledPredicate = true;
+                }
             }
             else if (inventoryQuery || actionExclude.length() > 0 || includeBlock.length() > 0 || includeEntity.length() > 0 || excludeBlock.length() > 0 || excludeEntity.length() > 0) {
                 queryBlock = queryBlock + " action NOT IN(-1) AND";
@@ -851,6 +976,7 @@ public class LookupRaw extends Queue {
 
             if (uuids.length() > 0) {
                 queryBlock = queryBlock + " uuid IN(" + uuids + ") AND";
+                unmodelledPredicate = true;
             }
 
             if (users.length() > 0) {
@@ -860,6 +986,11 @@ public class LookupRaw extends Queue {
             if (excludeUsers.length() > 0) {
                 queryBlock = queryBlock + " " + userColumn + " NOT IN(" + excludeUsers + ") AND";
             }
+
+            // Tell the compressed storage which users and block types this lookup wants, so whole
+            // segments that hold none of them are never opened.
+            SQLiteColdIndex.setLookupFilters(users, includeBlock, modelledActions);
+
 
             if (startTime > 0) {
                 queryBlock = queryBlock + " time > " + startTime + " AND";
@@ -872,11 +1003,61 @@ public class LookupRaw extends Queue {
             String rollbackPredicate = buildRollbackPredicate(rollbackState, actionList.contains(LookupActions.ITEM));
             if (!rollbackPredicate.isEmpty()) {
                 queryBlock = queryBlock + " " + rollbackPredicate + " AND";
+                unmodelledPredicate = true;
             }
 
             if (actionList.contains(LookupActions.SIGN)) {
+                unmodelledPredicate = true;
                 queryBlock = queryBlock + " action = " + SignActions.PLACE + " AND (LENGTH(line_1) > 0 OR LENGTH(line_2) > 0 OR LENGTH(line_3) > 0 OR LENGTH(line_4) > 0 OR LENGTH(line_5) > 0 OR LENGTH(line_6) > 0 OR LENGTH(line_7) > 0 OR LENGTH(line_8) > 0) AND";
             }
+
+            if (messageFilters != null && !messageFilters.isEmpty()) {
+                unmodelledPredicate = true;
+            }
+
+            // A page deep into a merged lookup is found by limiting the query to rows at or below a
+            // timestamp and reducing its offset by exactly how many matching rows lie above it.
+            long unionSkipped = 0;
+            if (!count && !summary && !selectPageRows && pageRows == null && limitCount > 0 && !unmodelledPredicate
+                    && ConfigHandler.databaseType.isSQLite() && !Boolean.TRUE.equals(RETRYING_WITHOUT_BUDGET.get())) {
+                try {
+                    String[] planTables = unionTables(actionList, lookup, queryTable);
+                    if (planTables.length > 1) {
+                        Map<String, String> excludedActions = new HashMap<>();
+                        if (actionExclude.length() > 0) {
+                            excludedActions.put("item", actionExclude);
+                        }
+                        if (includeBlock.length() > 0 || excludeBlock.length() > 0) {
+                            excludedActions.put("block", LookupActions.ENTITY_KILL + "," + LookupActions.ENTITY_SPAWN);
+                        }
+                        String excludedTypes = excludeBlock.length() > 0 || excludeEntity.length() > 0
+                                ? (excludeBlock.length() > 0 ? excludeBlock : "0")
+                                : null;
+                        ColdUnionPlan plan = ColdUnionPlan.forPage(statement.getConnection(), planTables, users, includeBlock,
+                                validAction && entityActionFilter == EntityActionFilter.DEFAULT ? action : null,
+                                excludeUsers.length() > 0 ? excludeUsers : null, excludedTypes, excludedActions,
+                                startTime, endTime, limitOffset);
+                        if (plan.isPlanned()) {
+                            SQLiteColdIndex.debug("plan union: cut at " + plan.getCutTime() + ", " + plan.getSkippedRows()
+                                    + " rows above, offset " + limitOffset + " -> " + (limitOffset - plan.getSkippedRows()));
+                            endTime = plan.getCutTime();
+                            unionSkipped = plan.getSkippedRows();
+                            limitOffset = (int) (limitOffset - unionSkipped);
+                            queryBlock = queryBlock + " time <= '" + endTime + "' AND";
+                            SQLiteColdIndex.beginLookup(startTime, endTime);
+                            SQLiteColdIndex.setRowBudget(pageBudget(pageRows, limitOffset, limitCount, count, summary, selectPageRows));
+                            SQLiteColdIndex.setLookupFilters(users, includeBlock, validAction && entityActionFilter == EntityActionFilter.DEFAULT ? action : null);
+                        }
+                    }
+                }
+                catch (Exception exception) {
+                    // Planning is an optimisation; without it the lookup simply reads more.
+                    ErrorReporter.report(exception);
+                }
+            }
+            // A count can be answered without reading a single compressed row, but only when the
+            // reader can evaluate the whole query itself.
+            SQLiteColdIndex.setCounting(count && !unmodelledPredicate);
 
             if (queryBlock.length() > 0) {
                 queryBlock = queryBlock.substring(0, queryBlock.length() - 4);
@@ -1012,10 +1193,12 @@ public class LookupRaw extends Queue {
                 String commandQuery = appendMessageFilters(baseQuery, messageFilters, "command", messageFilterBindings);
                 chatQuery = restrictSource(chatQuery, pageRows, 0);
                 commandQuery = restrictSource(commandQuery, pageRows, 1);
+                SQLiteColdIndex.setPredicateFilters(chatQuery, userColumn);
                 String chatTable = sourceTable(statement, "chat", locationWorldId, sourceBounds, entityContext, false, pageRows);
+                SQLiteColdIndex.setPredicateFilters(commandQuery, userColumn);
                 String commandTable = sourceTable(statement, "command", locationWorldId, sourceBounds, entityContext, false, pageRows);
-                query = unionSelect + "SELECT '0' as tbl," + rows + " FROM " + chatTable + " WHERE" + chatQuery + unionLimit + ") UNION ALL ";
-                query += unionSelect + "SELECT '1' as tbl," + rows + " FROM " + commandTable + " WHERE" + commandQuery + unionLimit + ")";
+                query = unionSelect + "SELECT '0' as tbl," + countedRows(rows, count, "chat") + " FROM " + chatTable + " WHERE" + chatQuery + unionLimit + ") UNION ALL ";
+                query += unionSelect + "SELECT '1' as tbl," + countedRows(rows, count, "command") + " FROM " + commandTable + " WHERE" + commandQuery + unionLimit + ")";
                 if (!count) {
                     queryOrder = " ORDER BY time DESC, tbl DESC, id DESC";
                 }
@@ -1051,8 +1234,9 @@ public class LookupRaw extends Queue {
                 }
 
                 String sourceQuery = restrictSource(baseQuery, pageRows, InventorySources.BLOCK);
+                SQLiteColdIndex.setPredicateFilters(sourceQuery, userColumn);
                 String sourceTable = sourceTable(statement, "block", locationWorldId, sourceBounds, entityContext, entitySpawnLocation, pageRows);
-                query = unionSelect + "SELECT " + "'0' as tbl," + rows + " FROM " + sourceTable + " " + index + "WHERE" + sourceQuery + unionLimit + ") UNION ALL ";
+                query = unionSelect + "SELECT " + "'0' as tbl," + countedRows(rows, count, "block") + " FROM " + sourceTable + " " + indexHint(sourceTable, index) + "WHERE" + sourceQuery + unionLimit + ") UNION ALL ";
                 itemLookup = true;
             }
 
@@ -1061,15 +1245,17 @@ public class LookupRaw extends Queue {
                     rows = "rowid as id,time," + userColumn + ",wid,x,y,z,type,metadata,data,amount,action,rolled_back,0 as entity_spawn_rowid";
                 }
                 String containerSourceQuery = restrictSource(queryNonBlock, pageRows, InventorySources.CONTAINER);
+                SQLiteColdIndex.setPredicateFilters(containerSourceQuery, userColumn);
                 String containerTable = sourceTable(statement, "container", locationWorldId, sourceBounds, entityContext, false, pageRows);
-                query = query + unionSelect + "SELECT " + "'1' as tbl," + rows + " FROM " + containerTable + " WHERE" + containerSourceQuery + unionLimit + ") UNION ALL ";
+                query = query + unionSelect + "SELECT " + "'1' as tbl," + countedRows(rows, count, "container") + " FROM " + containerTable + " WHERE" + containerSourceQuery + unionLimit + ") UNION ALL ";
 
                 if (!count && !selectPageRows) {
                     rows = "rowid as id,time," + userColumn + ",wid,x,y,z,type,metadata,data,amount,action,rolled_back,entity_spawn_rowid";
                 }
                 String entityContainerSourceQuery = restrictSource(queryEntityContainer, pageRows, InventorySources.ENTITY_CONTAINER);
+                SQLiteColdIndex.setPredicateFilters(entityContainerSourceQuery, userColumn);
                 String entityContainerTable = sourceTable(statement, "entity_container", locationWorldId, sourceBounds, entityContext, entityContainerLocation, pageRows, entityContainerId);
-                query = query + unionSelect + "SELECT '" + InventorySources.ENTITY_CONTAINER + "' as tbl," + rows + " FROM " + entityContainerTable + " WHERE" + entityContainerSourceQuery + unionLimit + ") UNION ALL ";
+                query = query + unionSelect + "SELECT '" + InventorySources.ENTITY_CONTAINER + "' as tbl," + countedRows(rows, count, "entity_container") + " FROM " + entityContainerTable + " WHERE" + entityContainerSourceQuery + unionLimit + ") UNION ALL ";
 
                 if (!count && !selectPageRows) {
                     rows = "rowid as id,time," + userColumn + ",wid,x,y,z,type,data as metadata,0 as data,amount,action,rolled_back,0 as entity_spawn_rowid";
@@ -1083,8 +1269,9 @@ public class LookupRaw extends Queue {
                 }
 
                 String itemSourceQuery = restrictSource(queryNonBlock, pageRows, InventorySources.ITEM);
+                SQLiteColdIndex.setPredicateFilters(itemSourceQuery, userColumn);
                 String itemTable = sourceTable(statement, "item", locationWorldId, sourceBounds, entityContext, false, pageRows);
-                query = query + unionSelect + "SELECT " + "'2' as tbl," + rows + " FROM " + itemTable + " WHERE" + itemSourceQuery + unionLimit + ")";
+                query = query + unionSelect + "SELECT " + "'2' as tbl," + countedRows(rows, count, "item") + " FROM " + itemTable + " WHERE" + itemSourceQuery + unionLimit + ")";
             }
 
             if (!itemLookup && (actionList.contains(LookupActions.CONTAINER) || actionList.contains(5))) {
@@ -1093,6 +1280,7 @@ public class LookupRaw extends Queue {
                 }
                 if (entityContainerId == null) {
                     String sourceQuery = restrictSource(queryNonBlock, pageRows, 0);
+                    SQLiteColdIndex.setPredicateFilters(sourceQuery, userColumn);
                     String sourceTable = sourceTable(statement, "container", locationWorldId, sourceBounds, entityContext, false, pageRows);
                     query = unionSelect + "SELECT '0' as tbl," + rows + " FROM " + sourceTable + " WHERE" + sourceQuery + unionLimit + ")";
                 }
@@ -1104,6 +1292,7 @@ public class LookupRaw extends Queue {
                         rows = "rowid as id,time," + userColumn + ",wid,x,y,z,type,metadata,data,amount,action,rolled_back,entity_spawn_rowid";
                     }
                     String sourceQuery = restrictSource(queryEntityContainer, pageRows, InventorySources.ENTITY_CONTAINER);
+                    SQLiteColdIndex.setPredicateFilters(sourceQuery, userColumn);
                     String sourceTable = sourceTable(statement, "entity_container", locationWorldId, sourceBounds, entityContext, entityContainerLocation, pageRows, entityContainerId);
                     query += unionSelect + "SELECT '" + InventorySources.ENTITY_CONTAINER + "' as tbl," + rows + " FROM " + sourceTable + " WHERE" + sourceQuery + unionLimit + ")";
                 }
@@ -1118,14 +1307,16 @@ public class LookupRaw extends Queue {
                         rows = "rowid as id,time," + userColumn + ",wid,x,y,z,type,meta as metadata,data,-1 as amount,action,rolled_back,0 as entity_spawn_rowid";
                     }
                     String sourceQuery = restrictSource(blockSourceQuery, pageRows, InventorySources.BLOCK);
+                    SQLiteColdIndex.setPredicateFilters(sourceQuery, userColumn);
                     String sourceTable = sourceTable(statement, "block", locationWorldId, sourceBounds, entityContext, entitySpawnLocation, pageRows);
-                    query = unionSelect + "SELECT '0' as tbl," + rows + " FROM " + sourceTable + " " + index + "WHERE" + sourceQuery + unionLimit + ")";
+                    query = unionSelect + "SELECT '0' as tbl," + countedRows(rows, count, queryTable) + " FROM " + sourceTable + " " + indexHint(sourceTable, index) + "WHERE" + sourceQuery + unionLimit + ")";
                 }
 
                 if (!count && !selectPageRows) {
                     rows = "rowid as id,time," + userColumn + ",wid,x,y,z,type,metadata,action as data,-1 as amount," + LookupActions.INTERACTION + " as action,rolled_back,entity_spawn_rowid";
                 }
                 String sourceQuery = restrictSource(queryEntityInteraction, pageRows, InventorySources.ENTITY_INTERACTION);
+                SQLiteColdIndex.setPredicateFilters(sourceQuery, userColumn);
                 String sourceTable = sourceTable(statement, "entity_interaction", locationWorldId, sourceBounds, entityContext, entityInteractionLocation, pageRows);
                 query += " UNION ALL " + unionSelect + "SELECT '" + InventorySources.ENTITY_INTERACTION + "' as tbl," + rows + " FROM " + sourceTable + " WHERE" + sourceQuery + unionLimit + ")";
                 if (!count) {
@@ -1143,8 +1334,20 @@ public class LookupRaw extends Queue {
                                 : queryTable.equals("entity_interaction") && entityInteractionLocation;
                 baseQuery = restrictSource(baseQuery, pageRows, 0);
                 Integer exactEntitySpawnRowId = queryTable.equals("entity_container") ? entityContainerId : null;
+
+                // This is the only query shape that reads a single table in row id order, so it is
+                // the only one where skipping segments lines up with the offset below. A union
+                // across tables is merged by time, where per table skipping would shift the merge.
+                SQLiteColdIndex.setPlannedOffset(pageBudget(pageRows, limitOffset, limitCount, count, summary, selectPageRows) > 0 ? limitOffset : 0);
+                SQLiteColdIndex.setPredicateFilters(baseQuery, userColumn);
                 String sourceTable = sourceTable(statement, queryTable, locationWorldId, sourceBounds, entityContext, entityFallback, pageRows, exactEntitySpawnRowId);
-                query = "SELECT " + "'0' as tbl," + rows + " FROM " + sourceTable + " " + index + "WHERE" + baseQuery;
+                query = "SELECT " + "'0' as tbl," + countedRows(rows, count, queryTable) + " FROM " + sourceTable + " " + indexHint(sourceTable, index) + "WHERE" + baseQuery;
+
+                // Rows the planner skipped were never read, so the query must not skip them again.
+                long planned = SQLiteColdIndex.skippedRows(queryTable);
+                if (planned > 0 && !count && !summary && !selectPageRows) {
+                    queryLimit = " LIMIT " + limitCount + " OFFSET " + (limitOffset - planned);
+                }
             }
 
             if (selectPageRows) {
@@ -1171,6 +1374,40 @@ public class LookupRaw extends Queue {
         return results;
     }
 
+    /**
+     * Index hints can only be applied to a plain table, so they are dropped when the lookup reads
+     * from a table expression that also covers compressed storage.
+     *
+     * @param sourceTable
+     *            the table expression the query reads from
+     * @param index
+     *            the index hint that would otherwise be used
+     * @return the hint to use
+     */
+    /**
+     * Adds the rows counted in compressed storage to a count query, so the total covers both the
+     * live table and the compressed segments without those segments being read as rows.
+     *
+     * @param rows
+     *            the select list the query would otherwise use
+     * @param count
+     *            true when the query is a count
+     * @param table
+     *            the unprefixed table the count is for
+     * @return the select list to use
+     */
+    private static String countedRows(String rows, boolean count, String table) {
+        if (!count) {
+            return rows;
+        }
+        long cold = SQLiteColdIndex.countedRows(table);
+        return cold > 0 ? "COUNT(*) + " + cold + " as count" : rows;
+    }
+
+    private static String indexHint(String sourceTable, String index) {
+        return sourceTable.startsWith("(") ? "" : index;
+    }
+
     private static String restrictSource(String query, Map<Integer, List<Long>> pageRows, int source) {
         if (pageRows != null) {
             List<Long> rowIds = pageRows.get(source);
@@ -1192,6 +1429,9 @@ public class LookupRaw extends Queue {
 
     private static String sourceTable(Statement statement, String table, int worldId, Integer[] sourceBounds, EntityLookupContext entityContext, boolean entityFallback, Map<Integer, List<Long>> pageRows, Integer exactEntitySpawnRowId) throws Exception {
         String tableName = ConfigHandler.prefix + table;
+        if (ConfigHandler.databaseType.isSQLite()) {
+            return SQLiteColdIndex.sourceExpression(statement.getConnection(), table, worldId, sourceBounds);
+        }
         if (!ConfigHandler.databaseType.isDuckDB() || pageRows != null) {
             return tableName;
         }

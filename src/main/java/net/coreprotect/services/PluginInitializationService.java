@@ -2,7 +2,6 @@ package net.coreprotect.services;
 
 import java.io.File;
 
-import org.bstats.bukkit.Metrics;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.PluginDescriptionFile;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -17,7 +16,6 @@ import net.coreprotect.language.Language;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.listener.ListenerHandler;
 import net.coreprotect.thread.CacheHandler;
-import net.coreprotect.thread.NetworkHandler;
 import net.coreprotect.thread.Scheduler;
 import net.coreprotect.thread.TickTimeMonitor;
 import net.coreprotect.utility.Chat;
@@ -81,8 +79,6 @@ public class PluginInitializationService {
             // Start background services
             startBackgroundServices(plugin);
 
-            // Start metrics
-            enableMetrics(plugin);
         }
 
         return start;
@@ -135,7 +131,6 @@ public class PluginInitializationService {
 
         Chat.console("--------------------");
         Chat.console(Phrase.build(Phrase.ENJOY_COREPROTECT, pluginDescription.getName()));
-        Chat.console(Phrase.build(Phrase.LINK_DISCORD, "www.coreprotect.net/discord/"));
         Chat.console("--------------------");
     }
 
@@ -146,17 +141,6 @@ public class PluginInitializationService {
      *            The CoreProtect plugin instance
      */
     private static void startBackgroundServices(CoreProtect plugin) {
-        // Start network handler
-        Scheduler.scheduleSyncDelayedTask(plugin, () -> {
-            try {
-                Thread networkHandler = new Thread(new NetworkHandler(true, true));
-                networkHandler.start();
-            }
-            catch (Exception e) {
-                ErrorReporter.report(e);
-            }
-        }, 0);
-
         // Start tick time monitor (only used where native tick timings are unavailable)
         TickTimeMonitor.initialize(plugin);
 
@@ -167,20 +151,5 @@ public class PluginInitializationService {
         Consumer.startConsumer();
         EntitySpawnTracking.initializeLoadedEntities();
         Extensions.startBackgroundService();
-    }
-
-    /**
-     * Enables metrics reporting
-     *
-     * @param plugin
-     *            The CoreProtect plugin instance
-     */
-    private static void enableMetrics(JavaPlugin plugin) {
-        try {
-            new Metrics(plugin, 2876);
-        }
-        catch (Exception e) {
-            // Failed to connect to bStats server or something else went wrong
-        }
     }
 }

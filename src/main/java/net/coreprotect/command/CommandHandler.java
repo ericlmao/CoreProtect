@@ -52,7 +52,7 @@ public class CommandHandler implements CommandExecutor {
                     else if (user.hasPermission("coreprotect.help") && corecommand.equals("help")) {
                         permission = true;
                     }
-                    else if (user.hasPermission("coreprotect.purge") && corecommand.equals("purge")) {
+                    else if (user.hasPermission("coreprotect.purge") && (corecommand.equals("purge") || corecommand.equals("compact"))) {
                         permission = true;
                     }
                     else if (user.hasPermission("coreprotect.lookup") && (corecommand.equals("l") || corecommand.equals("lookup") || corecommand.equals("page") || corecommand.equals("near"))) {
@@ -99,6 +99,9 @@ public class CommandHandler implements CommandExecutor {
                 else if (corecommand.equals("purge")) {
                     PurgeCommand.runCommand(user, permission, argumentArray);
                 }
+                else if (corecommand.equals("compact")) {
+                    CompactCommand.runCommand(user, permission, argumentArray);
+                }
                 else if (corecommand.equals("inspect") || corecommand.equals("i")) {
                     InspectCommand.runCommand(user, permission, argumentArray);
                 }
@@ -127,12 +130,7 @@ public class CommandHandler implements CommandExecutor {
                     GiveCommand.runCommand(user, command, permission, argumentArray);
                 }
                 else if (corecommand.equals("migrate-db")) {
-                    if (!VersionUtils.validDonationKey()) {
-                        Chat.sendMessage(user, Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.DONATION_KEY_REQUIRED));
-                    }
-                    else {
-                        Extensions.runDatabaseMigration(corecommand, user, argumentArray);
-                    }
+                    Extensions.runDatabaseMigration(corecommand, user, argumentArray);
                 }
                 else {
                     Chat.sendMessage(user, Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.COMMAND_NOT_FOUND, Color.WHITE, "/co " + corecommand));
@@ -140,36 +138,6 @@ public class CommandHandler implements CommandExecutor {
             }
             else {
                 Chat.sendMessage(user, Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.MISSING_PARAMETERS, Color.WHITE, "/co <parameters>"));
-            }
-
-            if (user.isOp() && versionAlert.get(user.getName()) == null) {
-                String latestVersion = NetworkHandler.latestVersion();
-                String latestEdgeVersion = NetworkHandler.latestEdgeVersion();
-                boolean communityEdition = VersionUtils.isCommunityEdition();
-                if (latestVersion != null || (latestEdgeVersion != null && !communityEdition)) {
-                    versionAlert.put(user.getName(), true);
-                    class updateAlert implements Runnable {
-                        @Override
-                        public void run() {
-                            try {
-                                Thread.sleep(5000);
-                                Chat.sendMessage(user, Color.WHITE + "----- " + Color.DARK_AQUA + Phrase.build(Phrase.UPDATE_HEADER, "CoreProtect" + (communityEdition ? " " + ConfigHandler.COMMUNITY_EDITION : "")) + Color.WHITE + " -----");
-                                if (latestVersion != null) {
-                                    Chat.sendMessage(user, Color.DARK_AQUA + Phrase.build(Phrase.UPDATE_NOTICE, Color.WHITE, "CoreProtect CE v" + latestVersion));
-                                    Chat.sendMessage(user, Color.DARK_AQUA + Phrase.build(Phrase.LINK_DOWNLOAD, Color.WHITE, "www.coreprotect.net/download/"));
-                                }
-                                else {
-                                    Chat.sendMessage(user, Color.DARK_AQUA + Phrase.build(Phrase.UPDATE_NOTICE, Color.WHITE, "CoreProtect v" + latestEdgeVersion));
-                                    Chat.sendMessage(user, Color.DARK_AQUA + Phrase.build(Phrase.LINK_DOWNLOAD, Color.WHITE, "www.coreprotect.net/latest/"));
-                                }
-                            }
-                            catch (Exception e) {
-                                ErrorReporter.report(e);
-                            }
-                        }
-                    }
-                    (new Thread(new updateAlert())).start();
-                }
             }
 
             return true;

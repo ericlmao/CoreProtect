@@ -81,7 +81,7 @@ public class ItemAPI {
         return new ItemResult(
                 results.getLong("time"), username, WorldUtils.getWorldName(results.getInt("wid")),
                 results.getInt("x"), results.getInt("y"), results.getInt("z"),
-                results.getInt("type"), results.getInt("amount"), DatabaseUtils.getBytes(results, "data"),
+                results.getInt("type"), results.getInt("amount"), DatabaseUtils.getBlobBytes(results, "data"),
                 results.getInt("action"), results.getInt("rolled_back")
         );
     }

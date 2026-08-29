@@ -23,6 +23,7 @@ public class InteractionLookup {
 
     public static String performLookup(String command, Statement statement, Block block, CommandSender commandSender, int offset, int page, int limit) {
         String result = "";
+        InspectorSource source = null;
 
         try {
             if (block == null) {
@@ -69,13 +70,15 @@ public class InteractionLookup {
                 results = statement.executeQuery(query);
             }
             else {
-                query = "SELECT COUNT(*) as count from " + ConfigHandler.prefix + "block " + WorldUtils.getWidIndex("block") + "WHERE " + where + " LIMIT 1 OFFSET 0";
+                // Compressed storage as well as the live rows.
+                source = InspectorSource.open(statement.getConnection(), "block", worldId, x, x, z, z, checkTime);
+                query = "SELECT COUNT(*) as count from " + source.table() + " " + source.index() + "WHERE " + where + " LIMIT 1 OFFSET 0";
                 results = statement.executeQuery(query);
                 while (results.next()) {
                     count = results.getInt("count");
                 }
                 results.close();
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back FROM " + ConfigHandler.prefix + "block " + WorldUtils.getWidIndex("block") + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + pageStart;
+                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back FROM " + source.table() + " " + source.index() + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + pageStart;
                 results = statement.executeQuery(query);
             }
 
@@ -146,6 +149,11 @@ public class InteractionLookup {
         }
         catch (Exception e) {
             ErrorReporter.report(e);
+        }
+        finally {
+            if (source != null) {
+                source.close();
+            }
         }
 
         return result;

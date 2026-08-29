@@ -66,6 +66,10 @@ public class Lookup extends Queue {
             paused = true;
 
             ResultSet results = LookupRaw.rawLookupResultSet(statement, user, checkUuids, checkUsers, restrictList, excludeList, excludeUserList, actionList, entityActionFilter, messageFilters, entityContext, location, radius, null, startTime, endTime, -1, -1, restrictWorld, lookup, true, entityContainerId, rollbackState);
+            if (results == null) {
+                // The query could not be run at all, which has already been reported to the user.
+                return 0;
+            }
             while (results.next()) {
                 int resultTable = results.getInt("tbl");
                 long count = results.getLong("count");

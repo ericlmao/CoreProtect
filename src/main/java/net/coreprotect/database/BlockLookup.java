@@ -18,6 +18,7 @@ public class BlockLookup {
 
     public static String whoPlaced(Statement statement, BlockState block) {
         String result = "";
+        boolean coldRows = false;
 
         try {
             if (block == null) {
@@ -29,8 +30,18 @@ public class BlockLookup {
             int z = block.getZ();
             int time = (int) (System.currentTimeMillis() / 1000L);
             int worldId = WorldUtils.getWorldId(block.getWorld().getName());
-            String table = DuckDBLookupQuery.spatialTable(statement.getConnection(), "block", worldId, x, x, z, z, "spatial_rows");
-            String index = ConfigHandler.databaseType.isDuckDB() ? "" : WorldUtils.getWidIndex("block");
+            String table;
+            String index;
+            if (ConfigHandler.databaseType.isSQLite()) {
+                SQLiteColdIndex.beginLookup(0, 0);
+                coldRows = true;
+                table = SQLiteColdIndex.sourceExpression(statement.getConnection(), "block", worldId, new Integer[] { 0, x, x, 0, 0, z, z });
+                index = table.startsWith("(") ? "" : WorldUtils.getWidIndex("block");
+            }
+            else {
+                table = DuckDBLookupQuery.spatialTable(statement.getConnection(), "block", worldId, x, x, z, z, "spatial_rows");
+                index = ConfigHandler.databaseType.isDuckDB() ? "" : WorldUtils.getWidIndex("block");
+            }
             String query = "SELECT " + ConfigHandler.databaseType.getUserColumn() + ",type FROM " + table + " " + index + "WHERE wid = " + worldId + " AND x = " + x + " AND z = " + z + " AND y = " + y + " AND rolled_back IN(0,2) AND action=1 ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT 1 OFFSET 0";
 
             ResultSet results = statement.executeQuery(query);
@@ -48,6 +59,16 @@ public class BlockLookup {
         }
         catch (Exception e) {
             ErrorReporter.report(e);
+        }
+        finally {
+            if (coldRows) {
+                try {
+                    SQLiteColdIndex.endLookup(statement.getConnection());
+                }
+                catch (Exception e) {
+                    ErrorReporter.report(e);
+                }
+            }
         }
 
         return result;

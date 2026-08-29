@@ -1,5 +1,6 @@
 package net.coreprotect.utility;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Array;
 import java.util.*;
@@ -19,12 +20,15 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.util.io.BukkitObjectInputStream;
 import org.bukkit.util.io.BukkitObjectOutputStream;
 
 import net.coreprotect.bukkit.BukkitAdapter;
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.model.BlockGroup;
+import net.coreprotect.utility.serialize.BlobCompression;
+import net.coreprotect.utility.serialize.ItemDataCodec;
 import net.coreprotect.utility.serialize.ItemMetaHandler;
 
 public class ItemUtils {
@@ -422,6 +426,16 @@ public class ItemUtils {
             return null;
         }
 
+        if (ConfigHandler.databaseType.isSQLite()) {
+            try {
+                return BlobCompression.compress(ItemDataCodec.encode(data));
+            }
+            catch (Exception codecFailure) {
+                // Fall through to the portable encoding; the read path handles either format.
+                ErrorReporter.report(codecFailure, ConfigHandler.EDITION_BRANCH.contains("-dev"));
+            }
+        }
+
         try {
             return serializeByteData(data);
         }
@@ -472,11 +486,36 @@ public class ItemUtils {
         return null;
     }
 
+    /**
+     * Reads an item or container payload back into the object tree it was written from, accepting
+     * either the compact binary encoding or the portable Java encoding, compressed or not.
+     *
+     * @param data
+     *            the stored payload, may be null
+     * @return the decoded payload, or null when there was none
+     * @throws Exception
+     *             if the payload cannot be read
+     */
+    public static Object deserializeByteData(byte[] data) throws Exception {
+        if (data == null) {
+            return null;
+        }
+
+        byte[] payload = BlobCompression.decompress(data);
+        if (ItemDataCodec.isEncoded(payload)) {
+            return ItemDataCodec.decode(payload);
+        }
+
+        try (ByteArrayInputStream byteStream = new ByteArrayInputStream(payload); BukkitObjectInputStream objectStream = new BukkitObjectInputStream(byteStream)) {
+            return objectStream.readObject();
+        }
+    }
+
     private static byte[] serializeByteData(Object data) throws Exception {
         try (ByteArrayOutputStream byteStream = new ByteArrayOutputStream(); BukkitObjectOutputStream objectStream = new BukkitObjectOutputStream(byteStream)) {
             objectStream.writeObject(data);
             objectStream.flush();
-            return byteStream.toByteArray();
+            return BlobCompression.compress(byteStream.toByteArray());
         }
     }
 

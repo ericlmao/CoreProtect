@@ -46,6 +46,7 @@ public final class EntityInteractionLookup {
             result.add(noData());
             return result;
         }
+        InspectorSource source = null;
 
         try {
             String resolvedCommand = resolveCommand(command, commandSender);
@@ -66,10 +67,13 @@ public final class EntityInteractionLookup {
                 query = DuckDBLookupQuery.pageQuery(sourceTable, ConfigHandler.prefix + "entity_interaction", where, columns, true, limit, pageStart);
             }
             else {
-                try (ResultSet results = statement.executeQuery("SELECT COUNT(*) AS count FROM " + ConfigHandler.prefix + "entity_interaction WHERE " + where)) {
+                // Compressed storage as well as the live rows, narrowed to the segments that hold
+                // rows for this entity.
+                source = InspectorSource.openForEntity(statement.getConnection(), "entity_interaction", entitySpawnRowId);
+                try (ResultSet results = statement.executeQuery("SELECT COUNT(*) AS count FROM " + source.table() + " WHERE " + where)) {
                     count = results.next() ? results.getInt("count") : 0;
                 }
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,type,action,rolled_back FROM " + ConfigHandler.prefix + "entity_interaction WHERE " + where + " ORDER BY time DESC,rowid DESC LIMIT " + limit + " OFFSET " + pageStart;
+                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,type,action,rolled_back FROM " + source.table() + " WHERE " + where + " ORDER BY time DESC,rowid DESC LIMIT " + limit + " OFFSET " + pageStart;
             }
             try (ResultSet results = statement.executeQuery(query)) {
                 while (results.next()) {
@@ -125,6 +129,11 @@ public final class EntityInteractionLookup {
         }
         catch (Exception e) {
             ErrorReporter.report(e);
+        }
+        finally {
+            if (source != null) {
+                source.close();
+            }
         }
         return result;
     }

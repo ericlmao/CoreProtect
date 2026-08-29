@@ -22,9 +22,12 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 
+import com.zaxxer.hikari.HikariDataSource;
+
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.consumer.Consumer;
+import net.coreprotect.utility.serialize.BlobDictionary;
 import net.coreprotect.consumer.Queue;
 import net.coreprotect.consumer.process.Process;
 import net.coreprotect.database.clickhouse.ClickHouseConsumerWriteBatch;
@@ -119,7 +122,12 @@ public class Database extends Queue {
                 statement.executeUpdate("START TRANSACTION");
             }
             else {
-                statement.executeUpdate("BEGIN TRANSACTION");
+                // Saying up front that the transaction will write takes the write lock now, which is
+                // something a busy timeout can wait for. Left unsaid, the transaction reads first and
+                // takes a snapshot, and if another writer commits before it gets to its own write
+                // that snapshot can no longer be extended into one. There is nothing to wait for
+                // then, so SQLite refuses at once and the timeout never applies.
+                statement.executeUpdate("BEGIN IMMEDIATE TRANSACTION");
             }
             started = true;
         }
@@ -307,10 +315,258 @@ public class Database extends Queue {
         }
     }
 
-    public static void performCheckpoint(Statement statement, DatabaseType databaseType) throws SQLException {
-        if (databaseType.isSQLite()) {
-            statement.executeUpdate("PRAGMA wal_checkpoint(TRUNCATE)");
+    /**
+     * Hands the pages the rewrite freed back to the file system.
+     *
+     * <p>
+     * An incremental vacuum is a transaction of its own and does nothing when one is already open,
+     * which is easy to miss: the call succeeds, reports nothing, and the file stays exactly the size
+     * it was. It is asked for every free page rather than a fixed number, because after this there
+     * can be a great many of them.
+     * </p>
+     *
+     * @param connection
+     *            an open connection
+     */
+    public static void reclaimFreePages(Connection connection) throws SQLException {
+        reclaimFreePages(connection, null);
+    }
+
+    /**
+     * Hands the pages freed by compacting back to the file system, stopping when asked to.
+     *
+     * @param connection
+     *            an open connection
+     * @param stop
+     *            consulted between batches, or null to run to completion
+     * @throws SQLException
+     *             if the pages cannot be returned
+     */
+    public static void reclaimFreePages(Connection connection, ColdRollupTask.Callback stop) throws SQLException {
+        reclaimFreePages(connection, stop, Long.MAX_VALUE);
+    }
+
+    /**
+     * Hands back freed pages, up to a limit.
+     *
+     * <p>
+     * A limit is what lets this be called while a long job is still running. Freed pages are not
+     * reusable until they are handed back, so a job that frees tens of gigabytes and only tidies up
+     * at the end grows the file by everything it freed before shrinking it again. Handing some back
+     * as it goes keeps the file near the size the data actually needs.
+     * </p>
+     *
+     * @param connection
+     *            an open connection
+     * @param stop
+     *            consulted between batches, or null to run to completion
+     * @param maximumPages
+     *            the most pages to hand back before returning
+     * @throws SQLException
+     *             if the pages cannot be returned
+     */
+    public static void reclaimFreePages(Connection connection, ColdRollupTask.Callback stop, long maximumPages) throws SQLException {
+        if (DatabaseRebuild.worthwhile(connection)) {
+            // Past a certain amount there is no point handing pages back one at a time: each page
+            // still holding data has to be moved out of the end of the file before the end can be
+            // dropped, which on a file that is mostly free space is days of work. That much free
+            // space is returned by writing the file out afresh when the server stops instead.
+            return;
         }
+
+        boolean autoCommit = connection.getAutoCommit();
+        if (!autoCommit) {
+            connection.commit();
+            connection.setAutoCommit(true);
+        }
+        try (Statement statement = connection.createStatement()) {
+            // The number of pages has to be given. Asked without one, the pragma returns a page at a
+            // time and the driver takes only the first, so the call appears to succeed while the file
+            // stays the size it was.
+            //
+            // It is asked for a bounded number at a time rather than for everything at once. Each
+            // call is a write transaction, and after a large compact there can be millions of pages
+            // to hand back; asked for in one go it holds the write lock for minutes, and everything
+            // else that wants to write gives up waiting. Asked for in pieces, the lock is released
+            // between them and logging carries on.
+            long pageSize = pragmaValue(statement, "PRAGMA page_size");
+            long previous = Long.MAX_VALUE;
+            long free = freePages(statement);
+            long outstanding = free;
+            long returned = 0;
+            long begun = System.currentTimeMillis();
+            long batch = RECLAIM_FIRST_PAGES;
+
+            // Said before the first page moves rather than after it. How long a call takes depends on
+            // how much live data has to be moved out of the end of the file to make the truncation
+            // possible, and on a database that is nearly all free space with its rows scattered
+            // through it that can be minutes. Waiting for a call to finish before saying anything
+            // leaves the operator watching a line that never changes.
+            report(outstanding, free, pageSize, begun);
+
+            while (free > 0 && free < previous && returned < maximumPages) {
+                long asked = Math.min(Math.min(free, batch), maximumPages - returned);
+                long started = System.currentTimeMillis();
+                statement.executeUpdate("PRAGMA incremental_vacuum(" + asked + ")");
+                long took = System.currentTimeMillis() - started;
+                previous = free;
+                free = freePages(statement);
+                returned = returned + asked;
+
+                // How many pages go back in a call barely changes how fast they go, so the size is
+                // chosen for how often it reports and how often it lets go of the write lock: long
+                // enough that standing back between calls costs little, short enough that a call
+                // finishes while somebody is still watching.
+                batch = adjust(batch, asked, took);
+
+                // Stand back before asking for the write lock again. Each of these is a write
+                // transaction, and SQLite does not hand the lock out in turn: taking it back the
+                // instant it is released keeps anything else waiting out for as long as this runs,
+                // however short each transaction is. After a large compact this runs for minutes.
+                report(outstanding, free, pageSize, begun);
+                yieldWriteLock(took);
+                if (stop != null) {
+                    try {
+                        stop.beforeSegment();
+                    }
+                    catch (Exception exception) {
+                        return;
+                    }
+                }
+            }
+        }
+        finally {
+            connection.setAutoCommit(autoCommit);
+        }
+    }
+
+    /**
+     * Pages handed back per call, to begin with.
+     *
+     * <p>
+     * Small, because the first call is the one nobody knows the cost of. What a page costs to hand
+     * back depends on whether anything live has to be moved out of the way first, which varies by
+     * orders of magnitude between databases and between stretches of the same file. Starting small
+     * and growing while calls stay quick finds the right size within a few seconds; starting large
+     * can mean minutes of silence before the first one returns.
+     * </p>
+     */
+    private static final long RECLAIM_FIRST_PAGES = 1000;
+
+    /** The most pages asked for in one call, once calls are known to be cheap. */
+    private static final long RECLAIM_MAXIMUM_PAGES = 65536;
+
+    /** The fewest, so an expensive stretch does not shrink the call down to nothing. */
+    private static final long RECLAIM_MINIMUM_PAGES = 100;
+
+    /**
+     * How long a call should take.
+     *
+     * <p>
+     * This is how long everything else on the server waits to write, since the whole call holds the
+     * write lock. A second is long enough that taking the lock is worth the trouble and short enough
+     * that logging does not visibly stall behind it.
+     * </p>
+     */
+    private static final long TARGET_MILLISECONDS = 1000;
+
+    /** Says how much space has gone back so far and how long the rest looks like taking. */
+    private static void report(long outstanding, long free, long pageSize, long begun) {
+        CompactProgress.set("returning freed space", ColdStorageStats.format((outstanding - free) * pageSize)
+                + " of " + ColdStorageStats.format(outstanding * pageSize)
+                + remaining(begun, outstanding - free, free));
+    }
+
+    /**
+     * Picks how many pages to ask for next, from how long the last call took.
+     *
+     * <p>
+     * The work per page varies by orders of magnitude: pages at the end of the file that are already
+     * free cost nothing to give up, while a live page at the end has to be moved somewhere earlier
+     * first, and its parent updated to say so. A fixed size therefore either crawls through the
+     * cheap stretches or disappears for minutes in the expensive ones. Aiming at a couple of seconds
+     * a call keeps it reporting either way.
+     * </p>
+     *
+     * @param batch
+     *            what was asked for last time
+     * @param asked
+     *            what was actually asked for, which may be less near the end
+     * @param took
+     *            how long that took
+     * @return what to ask for next
+     */
+    private static long adjust(long batch, long asked, long took) {
+        if (took < TARGET_MILLISECONDS / 2 && asked >= batch) {
+            return Math.min(RECLAIM_MAXIMUM_PAGES, batch * 2);
+        }
+        if (took > TARGET_MILLISECONDS * 2) {
+            return Math.max(RECLAIM_MINIMUM_PAGES, batch / 2);
+        }
+        return batch;
+    }
+
+    /**
+     * How long the rest of a run of pages is likely to take, in words.
+     *
+     * <p>
+     * Pages go back at a steady rate, so what has been returned so far and how long it took says
+     * what the rest will cost. It is left off until enough has been done for that rate to mean
+     * anything, since an estimate from the first second of a job that runs for an hour is noise.
+     * </p>
+     *
+     * @param begun
+     *            when the run started
+     * @param done
+     *            pages returned so far
+     * @param left
+     *            pages still to return
+     * @return something to append to the progress line, or an empty string when it is too early
+     */
+    static String remaining(long begun, long done, long left) {
+        long elapsed = System.currentTimeMillis() - begun;
+        if (done <= 0 || left <= 0 || elapsed < 2000) {
+            return "";
+        }
+        return ", " + CompactProgress.duration((long) (elapsed * (left / (double) done))) + " left";
+    }
+
+    /**
+     * Waits a moment so another writer can take the lock.
+     *
+     * @param workMilliseconds
+     *            how long the work just finished took
+     */
+    private static void yieldWriteLock(long workMilliseconds) {
+        try {
+            Thread.sleep(Math.max(1, Math.min(workMilliseconds, 25)));
+        }
+        catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static long pragmaValue(Statement statement, String pragma) throws SQLException {
+        try (ResultSet results = statement.executeQuery(pragma)) {
+            return results.next() ? results.getLong(1) : 0;
+        }
+    }
+
+    private static long freePages(Statement statement) throws SQLException {
+        try (ResultSet results = statement.executeQuery("PRAGMA freelist_count")) {
+            return results.next() ? results.getLong(1) : 0;
+        }
+    }
+
+    public static void performCheckpoint(Statement statement, DatabaseType databaseType) throws SQLException {
+        if (!databaseType.isSQLite()) {
+            return;
+        }
+        // Emptying the write ahead log needs a moment with nothing else writing. While compacting,
+        // purging or importing is running there is always something else writing, so the log is only
+        // moved along as far as it can be without waiting for them; it is emptied once they finish.
+        boolean backgroundWriter = Consumer.isBackgroundPurgeRunning() || ConfigHandler.purgeRunning || ConfigHandler.migrationRunning;
+        statement.executeUpdate("PRAGMA wal_checkpoint(" + (backgroundWriter ? "PASSIVE" : "TRUNCATE") + ")");
     }
 
     public static void setMultiInt(PreparedStatement statement, int value, int count) {
@@ -417,8 +673,7 @@ public class Database extends Queue {
                     }
                 }
 
-                String database = "jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite + "";
-                connection = DriverManager.getConnection(database);
+                connection = openSQLiteConnection();
 
                 ConfigHandler.databaseReachable = true;
             }
@@ -500,7 +755,62 @@ public class Database extends Queue {
         return true;
     }
 
+    /**
+     * Opens a SQLite connection from the connection pool, falling back to a direct connection
+     * when the pool has not been created yet.
+     *
+     * @return an open SQLite connection
+     * @throws SQLException
+     *             if a connection cannot be obtained
+     */
+    private static Connection openSQLiteConnection() throws SQLException {
+        HikariDataSource dataSource = ConfigHandler.sqliteDataSource;
+        if (dataSource != null && !dataSource.isClosed()) {
+            return dataSource.getConnection();
+        }
+        // Opened without the pool, and so without anything the pool would have set. A connection
+        // with no time to wait for a lock gives up the instant anything else is writing.
+        Connection connection = DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("PRAGMA busy_timeout=30000");
+            statement.executeUpdate("PRAGMA temp_store=FILE");
+        }
+        return connection;
+    }
+
+    /**
+     * @param failure
+     *            something thrown by a database call
+     * @return true when it failed only because something else was writing
+     */
+    public static boolean isLocked(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && (message.contains("database is locked") || message.contains("SQLITE_BUSY"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     public static void closeConnection() {
+        SQLiteColdIndex.invalidate();
+        SegmentDictionary.clearCache();
+        BlobDictionary.clear();
+        ColdBlobStore.clearCache();
+        if (ConfigHandler.sqliteDataSource != null) {
+            try {
+                ConfigHandler.sqliteDataSource.close();
+            }
+            catch (Exception e) {
+                ErrorReporter.report(e);
+            }
+            finally {
+                ConfigHandler.sqliteDataSource = null;
+            }
+        }
         if (ConfigHandler.hikariDataSource != null) {
             try {
                 ConfigHandler.hikariDataSource.close();
@@ -583,7 +893,7 @@ public class Database extends Queue {
             connection = requireClickHouseDatabase().openConnection();
         }
         else {
-            connection = DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+            connection = openSQLiteConnection();
         }
 
         String sql = "SELECT 1 FROM " + ConfigHandler.prefix + "database_lock WHERE rowid=1 AND status=" + DATABASE_LOCK_MIGRATION_INCOMPLETE + " LIMIT 1";
@@ -660,8 +970,63 @@ public class Database extends Queue {
                     continue;
                 }
             }
+
+            // Rows that have already been rolled into compressed storage are not in the live table
+            // any more. Their new state is recorded alongside the segments instead, which the
+            // lookups apply when they read those rows back.
+            updated = updated + recordColdRollbackState(statement, tableName, rolledBack, rowIds.subList(startIndex, endIndex));
+            if (updated >= expected) {
+                continue;
+            }
             throw new SQLException("Expected " + expected + " rolled-back row updates in " + tableName + ", updated " + updated);
         }
+    }
+
+    /**
+     * Records the rolled back state of rows that live in compressed storage.
+     *
+     * @param statement
+     *            a statement on the database being updated
+     * @param tableName
+     *            the unprefixed table the rows belong to
+     * @param rolledBack
+     *            the state to record
+     * @param rowIds
+     *            the rows being updated
+     * @return the number of rows that were recorded
+     * @throws SQLException
+     *             if the state cannot be recorded
+     */
+    private static int recordColdRollbackState(Statement statement, String tableName, int rolledBack, List<Long> rowIds) throws SQLException {
+        Integer tableId = SQLiteColdIndex.tableId(tableName);
+        if (!ConfigHandler.databaseType.isSQLite() || tableId == null) {
+            return 0;
+        }
+
+        long highWater = SQLiteColdIndex.coldHighWaterMark(tableName);
+        if (highWater <= 0) {
+            return 0;
+        }
+
+        int recorded = 0;
+        String insert = "INSERT OR REPLACE INTO " + ConfigHandler.prefix + "cold_flag (table_id,rowid_ref,rolled_back) VALUES (?,?,?)";
+        try (PreparedStatement preparedStatement = statement.getConnection().prepareStatement(insert)) {
+            for (Long rowId : rowIds) {
+                if (rowId == null || rowId > highWater) {
+                    continue;
+                }
+                preparedStatement.setInt(1, tableId);
+                preparedStatement.setLong(2, rowId);
+                preparedStatement.setInt(3, rolledBack);
+                preparedStatement.addBatch();
+                recorded++;
+            }
+            if (recorded > 0) {
+                preparedStatement.executeBatch();
+            }
+        }
+
+        return recorded;
     }
 
     private static int getRolledBackUpdateBatchSize() {
@@ -1004,6 +1369,11 @@ public class Database extends Queue {
 
                 identifyExistingTablesAndIndexes(statement, attachDatabase, tableData, indexData);
                 String tablePrefix = forcePrefix ? prefix : ConfigHandler.prefix;
+                if (!purge && forceConnection == null && tableData.isEmpty()) {
+                    // A brand new database: settings that are baked into the file itself have to be
+                    // applied before the first table is written.
+                    SQLiteSchema.applyFileSettings(statement);
+                }
                 boolean createChatMessagePrefixIndex = !tableData.contains(tablePrefix + "chat");
                 boolean createCommandMessagePrefixIndex = !tableData.contains(tablePrefix + "command");
                 boolean createSignMessagePrefixIndexes = !tableData.contains(tablePrefix + "sign");
@@ -1011,6 +1381,7 @@ public class Database extends Queue {
                 createSQLiteIndexes(tablePrefix, statement, indexData, attachDatabase, purge, createChatMessagePrefixIndex, createCommandMessagePrefixIndex, createSignMessagePrefixIndexes);
 
                 if (!purge && forceConnection == null) {
+                    SQLiteSchema.createTables(tablePrefix, statement);
                     initializeTables(prefix, statement, DatabaseType.SQLITE);
                 }
             }

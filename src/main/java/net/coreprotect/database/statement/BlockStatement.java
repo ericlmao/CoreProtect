@@ -12,6 +12,7 @@ import net.coreprotect.database.DatabaseType;
 import net.coreprotect.utility.BlockUtils;
 import net.coreprotect.utility.ErrorReporter;
 import net.coreprotect.utility.ItemUtils;
+import net.coreprotect.utility.serialize.BlobCompression;
 import net.coreprotect.utility.serialize.BlockMetaCodec;
 
 public class BlockStatement {
@@ -97,6 +98,9 @@ public class BlockStatement {
         if (databaseType.isColumnar()) {
             return BlockMetaCodec.encode(metadata);
         }
+        if (databaseType.isSQLite()) {
+            return BlobCompression.compress(BlockMetaCodec.encode(metadata));
+        }
         byte[] result = ItemUtils.convertByteData(metadata);
         if (result == null) {
             throw new IllegalArgumentException("Unable to serialize legacy block metadata");
@@ -104,7 +108,8 @@ public class BlockStatement {
         return result;
     }
 
-    private static List<Object> deserializeMetadataStrict(byte[] metadata) throws Exception {
+    private static List<Object> deserializeMetadataStrict(byte[] storedMetadata) throws Exception {
+        byte[] metadata = BlobCompression.decompress(storedMetadata);
         if (BlockMetaCodec.isEncoded(metadata)) {
             return BlockMetaCodec.decode(metadata);
         }

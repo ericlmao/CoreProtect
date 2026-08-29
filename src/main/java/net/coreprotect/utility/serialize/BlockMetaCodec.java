@@ -55,6 +55,8 @@ public final class BlockMetaCodec {
     private static final String DESCRIPTION = "Block metadata";
     private static final int MAGIC_FIRST = 'C';
     private static final int MAGIC_SECOND = 'B';
+    /** Second magic byte for item and container payloads, which share this codec's value encoding. */
+    private static final int ITEM_MAGIC_SECOND = 'I';
     private static final int VERSION = 1;
 
     private static final int NULL = 0;
@@ -248,6 +250,61 @@ public final class BlockMetaCodec {
 
     public static byte[] canonicalize(byte[] encoded) {
         return encode(decode(encoded));
+    }
+
+    /**
+     * Encodes an item or container payload, which is an arbitrary tree of lists, maps, strings and
+     * numbers produced by {@link ItemMetaHandler#serialize}. The value encoding is shared with block
+     * metadata; only the header differs, so the two formats never have to be told apart by shape.
+     *
+     * @param data
+     *            the payload to encode
+     * @return the encoded payload
+     */
+    public static byte[] encodeItemData(Object data) {
+        Objects.requireNonNull(data, "data");
+        BinaryOutput output = new BinaryOutput();
+        output.write(MAGIC_FIRST);
+        output.write(ITEM_MAGIC_SECOND);
+        output.write(VERSION);
+        encodeValue(output, data, 1);
+        return output.toByteArray();
+    }
+
+    /**
+     * Decodes a payload written by {@link #encodeItemData(Object)}.
+     *
+     * @param encoded
+     *            the encoded payload
+     * @return the decoded payload
+     */
+    public static Object decodeItemData(byte[] encoded) {
+        Objects.requireNonNull(encoded, "encoded");
+        if (encoded.length > BinaryCodecSupport.MAX_ENCODED_LENGTH) {
+            throw new IllegalArgumentException("Item data exceeds the maximum encoded size");
+        }
+
+        try {
+            BinaryInput input = new BinaryInput(encoded);
+            input.readItemHeader();
+            Object value = input.readValue(1);
+            input.requireEnd();
+            return value;
+        }
+        catch (StackOverflowError error) {
+            throw new IllegalArgumentException("Item data exceeds the maximum nesting depth", error);
+        }
+    }
+
+    /**
+     * @param data
+     *            the stored payload, may be null
+     * @return true if the payload was written by {@link #encodeItemData(Object)}
+     */
+    public static boolean isItemDataEncoded(byte[] data) {
+        return data != null && data.length >= 2
+                && Byte.toUnsignedInt(data[0]) == MAGIC_FIRST
+                && Byte.toUnsignedInt(data[1]) == ITEM_MAGIC_SECOND;
     }
 
     public static boolean isEncoded(byte[] data) {
@@ -857,6 +914,16 @@ public final class BlockMetaCodec {
 
         private BinaryInput(byte[] data) {
             super(data, DESCRIPTION);
+        }
+
+        private void readItemHeader() {
+            if (readUnsignedByte() != MAGIC_FIRST || readUnsignedByte() != ITEM_MAGIC_SECOND) {
+                throw new IllegalArgumentException("Item data does not use the CoreProtect binary format");
+            }
+            int version = readUnsignedByte();
+            if (version != VERSION) {
+                throw new IllegalArgumentException("Unsupported item data format version " + version);
+            }
         }
 
         private Kind readHeader() {

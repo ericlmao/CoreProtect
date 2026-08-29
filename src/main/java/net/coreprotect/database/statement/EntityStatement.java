@@ -22,11 +22,13 @@ import org.bukkit.util.io.BukkitObjectOutputStream;
 
 import net.coreprotect.bukkit.BukkitAdapter;
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.database.ColdBlobStore;
 import net.coreprotect.database.ConsumerWriteBatch;
 import net.coreprotect.database.Database;
 import net.coreprotect.database.DatabaseType;
 import net.coreprotect.utility.DatabaseUtils;
 import net.coreprotect.utility.ErrorReporter;
+import net.coreprotect.utility.serialize.BlobCompression;
 import net.coreprotect.utility.serialize.EntityDataCodec;
 import net.coreprotect.utility.serialize.EntityDataCodec.Kind;
 
@@ -92,6 +94,9 @@ public class EntityStatement {
         if (databaseType.isColumnar()) {
             return EntityDataCodec.encode(kind, data);
         }
+        if (databaseType.isSQLite()) {
+            return BlobCompression.compress(EntityDataCodec.encode(kind, data));
+        }
         return serializeLegacyData(sanitizeData(data));
     }
 
@@ -99,7 +104,7 @@ public class EntityStatement {
         try (ByteArrayOutputStream output = new ByteArrayOutputStream(); BukkitObjectOutputStream objectOutput = new BukkitObjectOutputStream(output)) {
             objectOutput.writeObject(data);
             objectOutput.flush();
-            return output.toByteArray();
+            return BlobCompression.compress(output.toByteArray());
         }
     }
 
@@ -171,21 +176,65 @@ public class EntityStatement {
             }
 
             String query = "SELECT rowid AS id,data FROM " + ConfigHandler.prefix + "entity WHERE rowid IN(" + placeholders + ")";
+            List<Long> packedAway = new ArrayList<>();
             try (PreparedStatement preparedStatement = connection.prepareStatement(query)) {
                 for (int index = offset; index < end; index++) {
                     preparedStatement.setInt(index - offset + 1, ids.get(index));
                 }
                 try (ResultSet resultSet = preparedStatement.executeQuery()) {
                     while (resultSet.next()) {
-                        List<Object> data = readData(resultSet, "data", Kind.ENTITY);
+                        byte[] stored = DatabaseUtils.getBlobBytes(resultSet, "data");
+                        if (stored == null || stored.length == 0) {
+                            // The row is still here but its blob has been packed away with those of
+                            // the rows around it.
+                            packedAway.add((long) resultSet.getInt("id"));
+                            continue;
+                        }
+                        List<Object> data = deserializeData(stored, Kind.ENTITY);
                         if (!data.isEmpty()) {
                             result.put(resultSet.getInt("id"), data);
                         }
                     }
                 }
             }
+
+            for (Map.Entry<Long, byte[]> entry : ColdBlobStore.load(connection, "entity", packedAway).entrySet()) {
+                List<Object> data = deserializeData(entry.getValue(), Kind.ENTITY);
+                if (!data.isEmpty()) {
+                    result.put(entry.getKey().intValue(), data);
+                }
+            }
         }
         return result;
+    }
+
+    /**
+     * Reads one entity's data by row id, wherever it is held.
+     *
+     * @param statement
+     *            an open statement
+     * @param rowId
+     *            the entity row
+     * @return the entity data, or an empty list when there is none
+     */
+    public static List<Object> getData(Statement statement, int rowId) {
+        try {
+            String query = "SELECT data FROM " + ConfigHandler.prefix + "entity WHERE rowid=" + rowId + " LIMIT 1 OFFSET 0";
+            byte[] stored = null;
+            try (ResultSet resultSet = statement.executeQuery(query)) {
+                if (resultSet.next()) {
+                    stored = DatabaseUtils.getBlobBytes(resultSet, "data");
+                }
+            }
+            if (stored == null || stored.length == 0) {
+                stored = ColdBlobStore.load(statement.getConnection(), "entity", rowId);
+            }
+            return deserializeData(stored, Kind.ENTITY);
+        }
+        catch (Exception e) {
+            ErrorReporter.report(e, ConfigHandler.EDITION_BRANCH.contains("-dev"));
+            return new ArrayList<>();
+        }
     }
 
     public static List<Object> deserializeData(byte[] data) {
@@ -208,10 +257,36 @@ public class EntityStatement {
     }
 
     public static List<Object> readData(ResultSet resultSet, String column, Kind kind) throws SQLException {
-        return deserializeData(DatabaseUtils.getBytes(resultSet, column), kind);
+        return deserializeData(DatabaseUtils.getBlobBytes(resultSet, column), kind);
     }
 
-    private static List<Object> deserializeDataStrict(byte[] data, Kind kind) throws Exception {
+    /**
+     * Reads a blob from a result set, looking in the packed groups when the row no longer carries it.
+     *
+     * @param resultSet
+     *            positioned on the row
+     * @param column
+     *            the blob column
+     * @param kind
+     *            what the blob holds
+     * @param connection
+     *            an open connection, used only when the blob has been packed away
+     * @param table
+     *            the unprefixed table the row came from
+     * @param rowId
+     *            the row id
+     * @return the data, or an empty list when there is none
+     */
+    public static List<Object> readData(ResultSet resultSet, String column, Kind kind, Connection connection, String table, long rowId) throws SQLException {
+        byte[] stored = DatabaseUtils.getBlobBytes(resultSet, column);
+        if (stored == null || stored.length == 0) {
+            stored = ColdBlobStore.load(connection, table, rowId);
+        }
+        return deserializeData(stored, kind);
+    }
+
+    private static List<Object> deserializeDataStrict(byte[] storedData, Kind kind) throws Exception {
+        byte[] data = BlobCompression.decompress(storedData);
         if (EntityDataCodec.isEncoded(data)) {
             return EntityDataCodec.decode(kind, data);
         }

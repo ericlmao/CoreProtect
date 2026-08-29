@@ -534,7 +534,7 @@ final class ClickHouseEntitySpawnUpdates implements ConsumerEntitySpawnUpdates {
     private ClickHouseEntityState readState(ResultSet resultSet) throws Exception {
         int rowId = resultSet.getInt("rowid");
         ClickHouseEventPointer pointer = new ClickHouseEventPointer(datasetId, ClickHouseFamily.ENTITY_SPAWN, resultSet.getLong("batch_sequence"), resultSet.getInt("batch_ordinal"), rowId, resultSet.getInt("time"), resultSet.getInt("wid"), resultSet.getInt("key_x"), resultSet.getInt("key_z"));
-        byte[] data = DatabaseUtils.getBytes(resultSet, "data");
+        byte[] data = DatabaseUtils.getBlobBytes(resultSet, "data");
         return new ClickHouseEntityState(pointer, nullableLong(resultSet, "block_rowid"), nullableInteger(resultSet, "kill_rowid"), UUID.fromString(resultSet.getString("uuid")), resultSet.getInt("current_wid"), resultSet.getDouble("current_x"), resultSet.getDouble("current_y"), resultSet.getDouble("current_z"), resultSet.getFloat("yaw"), resultSet.getFloat("pitch"), data, resultSet.getInt("removed") == 1);
     }
 
