@@ -376,9 +376,9 @@ public final class BlobRecompressTask {
             stored = stored + compressed.length;
         }
 
-        boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
-        try {
+        // Started from a known transaction state: see Database.inTransaction for what goes wrong
+        // when the driver and the database disagree about whether one is already open.
+        Database.inTransaction(connection, () -> {
             try (PreparedStatement statement = connection.prepareStatement(insertGroup)) {
                 for (int index = 0; index < groups.size(); index++) {
                     ColdBlobStore.Group group = groups.get(index);
@@ -413,15 +413,7 @@ public final class BlobRecompressTask {
                 }
                 statement.executeBatch();
             }
-            connection.commit();
-        }
-        catch (SQLException exception) {
-            connection.rollback();
-            throw exception;
-        }
-        finally {
-            connection.setAutoCommit(autoCommit);
-        }
+        });
 
         return before - stored;
     }
@@ -540,9 +532,7 @@ public final class BlobRecompressTask {
         }
         String insert = "INSERT INTO " + ConfigHandler.prefix + table + " (" + columns.list + ") VALUES (" + placeholders + ")";
 
-        boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
-        try {
+        Database.inTransaction(connection, () -> {
             try (PreparedStatement statement = connection.prepareStatement("DELETE FROM " + ConfigHandler.prefix + table + " WHERE rowid > ? AND rowid <= ?")) {
                 statement.setLong(1, after);
                 statement.setLong(2, through);
@@ -557,15 +547,7 @@ public final class BlobRecompressTask {
                 }
                 statement.executeBatch();
             }
-            connection.commit();
-        }
-        catch (SQLException exception) {
-            connection.rollback();
-            throw exception;
-        }
-        finally {
-            connection.setAutoCommit(autoCommit);
-        }
+        });
 
         return before - now;
     }

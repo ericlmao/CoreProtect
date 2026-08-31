@@ -101,6 +101,100 @@ public class Database extends Queue {
         SQL_QUERIES.put(ENTITY_INTERACTION, "INSERT INTO %sprefix%entity_interaction (time, %user%, entity_spawn_rowid, wid, x, y, z, type, action, metadata, rolled_back) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     }
 
+    /** A piece of work that is to succeed or fail as a whole. */
+    public interface TransactionalWork {
+        void run() throws SQLException;
+    }
+
+    /**
+     * Settles any disagreement between the driver and the database about whether a transaction is
+     * open, leaving the connection in auto-commit.
+     *
+     * <p>
+     * Transactions are started two ways in this code base: through the driver, and by running BEGIN
+     * and COMMIT as ordinary statements. The driver keeps its own idea of whether one is open, and
+     * the two can come apart, because a COMMIT run as a statement, or the release of a savepoint
+     * that started its own transaction, ends the transaction without the driver hearing of it. What
+     * follows is hard to read from the error it produces: the driver believes a transaction is
+     * already open, so asking for one does nothing, every write goes in on its own under
+     * auto-commit, and the commit at the end fails with "cannot commit - no transaction is active".
+     * </p>
+     *
+     * <p>
+     * Asking the connection to hand back whatever it believes it is holding, and not minding if it
+     * turns out to be holding nothing, settles that before it matters. Nothing is lost by it: the
+     * writes of a transaction the driver has lost track of have already been committed.
+     * </p>
+     *
+     * @param connection
+     *            an open connection
+     * @throws SQLException
+     *             if the connection cannot be put back into auto-commit
+     */
+    public static void resetTransactionState(Connection connection) throws SQLException {
+        if (connection.getAutoCommit()) {
+            return;
+        }
+
+        try {
+            connection.commit();
+        }
+        catch (SQLException nothingOpen) {
+            // No transaction to commit, which is the disagreement this exists to settle.
+        }
+
+        try {
+            connection.setAutoCommit(true);
+        }
+        catch (SQLException nothingOpen) {
+            // The driver ends the transaction it thinks it has on the way back to auto-commit, and
+            // complains for the same reason. It records the change before making it, so the
+            // connection is in auto-commit either way.
+        }
+
+        if (!connection.getAutoCommit()) {
+            throw new SQLException("The connection could not be returned to auto-commit");
+        }
+    }
+
+    /**
+     * Runs a piece of work as one transaction, starting from a known transaction state rather than
+     * from whatever the driver believes the state to be.
+     *
+     * @param connection
+     *            an open connection, which must not already be inside a transaction of its own
+     * @param work
+     *            the work to run
+     * @throws SQLException
+     *             if the work or the commit fails, after the transaction has been rolled back
+     */
+    public static void inTransaction(Connection connection, TransactionalWork work) throws SQLException {
+        resetTransactionState(connection);
+        connection.setAutoCommit(false);
+        try {
+            work.run();
+            connection.commit();
+        }
+        catch (SQLException failure) {
+            try {
+                connection.rollback();
+            }
+            catch (SQLException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        }
+        finally {
+            try {
+                connection.setAutoCommit(true);
+            }
+            catch (SQLException ignored) {
+                // Whatever it is complaining about, the next transaction on this connection starts
+                // by settling it, and the failure of the work itself is the one worth reporting.
+            }
+        }
+    }
+
     public static void beginTransaction(Statement statement, boolean isMySQL) throws SQLException {
         beginTransaction(statement, isMySQL ? DatabaseType.MYSQL : DatabaseType.SQLITE);
     }
@@ -374,11 +468,9 @@ public class Database extends Queue {
             return;
         }
 
-        boolean autoCommit = connection.getAutoCommit();
-        if (!autoCommit) {
-            connection.commit();
-            connection.setAutoCommit(true);
-        }
+        // Each of the calls below is a transaction of its own, and does nothing at all if one is
+        // already open, so the connection is put back into auto-commit before the first of them.
+        resetTransactionState(connection);
         try (Statement statement = connection.createStatement()) {
             // The number of pages has to be given. Asked without one, the pragma returns a page at a
             // time and the driver takes only the first, so the call appears to succeed while the file
@@ -434,9 +526,6 @@ public class Database extends Queue {
                     }
                 }
             }
-        }
-        finally {
-            connection.setAutoCommit(autoCommit);
         }
     }
 
