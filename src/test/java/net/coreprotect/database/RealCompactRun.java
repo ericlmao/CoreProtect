@@ -84,6 +84,14 @@ class RealCompactRun {
                 SQLiteSchema.createTables(ConfigHandler.prefix, statement);
             }
 
+            // The state the server's connection was in when a compact last failed on it. The
+            // consumer starts its transactions by running BEGIN and COMMIT as statements, which the
+            // driver does not hear about, so a connection that has logged anything can arrive here
+            // with the driver believing a transaction is open when the database has none. Started
+            // from there, every write of a segment used to go in on its own and the commit that
+            // followed failed with "cannot commit - no transaction is active".
+            desynchronise(connection);
+
             report(connection, "before");
 
             BlobRecompressTask.loadDictionaries(connection);
@@ -273,6 +281,19 @@ class RealCompactRun {
     }
 
     /** Opened with the settings the plugin's own pool uses. */
+    /**
+     * Leaves the driver believing a transaction is open while the database has none, which is what a
+     * COMMIT run as a statement does.
+     */
+    private static void desynchronise(Connection connection) throws SQLException {
+        connection.setAutoCommit(false);
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("INSERT OR REPLACE INTO " + ConfigHandler.prefix + "schema (name, value) VALUES ('real_compact_run', '1')");
+            statement.executeUpdate("COMMIT");
+        }
+        assertTrue(!connection.getAutoCommit(), "the driver still believes it is inside a transaction");
+    }
+
     private static Connection open() throws SQLException {
         Connection connection = DriverManager.getConnection("jdbc:sqlite:" + DATABASE);
         try (Statement statement = connection.createStatement()) {

@@ -600,22 +600,15 @@ public final class LegacyImport {
         String sql = "INSERT INTO main." + ConfigHandler.prefix + table + " (" + columns.target + ") SELECT " + columns.source
                 + " FROM " + LEGACY + "." + sourcePrefix + table + " WHERE rowid > ? AND rowid <= ?";
 
-        boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setLong(1, after);
-            statement.setLong(2, through);
-            long copied = statement.executeUpdate();
-            connection.commit();
-            return copied;
-        }
-        catch (SQLException exception) {
-            connection.rollback();
-            throw exception;
-        }
-        finally {
-            connection.setAutoCommit(autoCommit);
-        }
+        long[] copied = new long[1];
+        Database.inTransaction(connection, () -> {
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setLong(1, after);
+                statement.setLong(2, through);
+                copied[0] = statement.executeUpdate();
+            }
+        });
+        return copied[0];
     }
 
     /** The column list a copy reads and the one it writes, which differ when the source is older. */

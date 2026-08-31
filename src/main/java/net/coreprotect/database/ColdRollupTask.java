@@ -418,9 +418,10 @@ public final class ColdRollupTask {
                 + "user_stats,type_stats,action_stats,spawn_filter) "
                 + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
-        boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
-        try {
+        // Started from a known transaction state rather than from whatever the driver believes it
+        // to be. The two can come apart, and when they do the writes below go in one at a time and
+        // the commit fails with "cannot commit - no transaction is active", taking the compact down.
+        Database.inTransaction(connection, () -> {
             try (PreparedStatement statement = connection.prepareStatement(insert)) {
                 statement.setInt(1, tableId);
                 statement.setLong(2, block.minRowId);
@@ -455,21 +456,7 @@ public final class ColdRollupTask {
                     throw new SQLException("Sealed " + block.rowIds.size() + " rows of " + table + " but removed " + deleted);
                 }
             }
-
-            connection.commit();
-        }
-        catch (SQLException exception) {
-            try {
-                connection.rollback();
-            }
-            catch (SQLException rollbackFailure) {
-                exception.addSuppressed(rollbackFailure);
-            }
-            throw exception;
-        }
-        finally {
-            connection.setAutoCommit(autoCommit);
-        }
+        });
     }
 
     /**
