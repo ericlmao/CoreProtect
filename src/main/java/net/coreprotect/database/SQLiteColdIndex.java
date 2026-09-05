@@ -19,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.utility.ErrorReporter;
 import net.coreprotect.utility.serialize.BlobCompression;
 
 /**
@@ -390,6 +391,7 @@ public final class SQLiteColdIndex {
         private boolean truncated;
         private long plannedOffset;
         private boolean outOfReach;
+        private boolean readFailed;
         private final Map<String, Long> skipped = new HashMap<>();
         private boolean counting;
         private final Map<String, Long> counts = new HashMap<>();
@@ -479,6 +481,21 @@ public final class SQLiteColdIndex {
     public static boolean isOutOfReach() {
         LookupContext context = LOOKUP.get();
         return context != null && context.outOfReach;
+    }
+
+    /**
+     * @return true if compressed rows the lookup needed could not be read at all
+     */
+    public static boolean readFailed() {
+        LookupContext context = LOOKUP.get();
+        return context != null && context.readFailed;
+    }
+
+    /**
+     * @return the most compressed rows one lookup may read
+     */
+    public static long maximumRows() {
+        return Config.getGlobal().COLD_MAX_ROWS > 0 ? Config.getGlobal().COLD_MAX_ROWS : DEFAULT_MAXIMUM_ROWS;
     }
 
     /**
@@ -597,11 +614,16 @@ public final class SQLiteColdIndex {
      * @return the listed values, or null when the clause does not restrict that column that way
      */
     static String listedValues(String where, String column, boolean negated) {
-        Matcher matcher = Pattern.compile("(?<![A-Za-z0-9_])" + Pattern.quote(column) + "\\s+" + (negated ? "NOT\\s+IN" : "IN") + "\\s*\\(([-0-9,\\s]+)\\)").matcher(where);
+        // A column is restricted either to a list or, for a single action, by equality. Either way
+        // the values are read out as one list; an inequality is not a restriction to anything.
+        String restriction = negated
+                ? "\\s+NOT\\s+IN\\s*\\(([-0-9,\\s]+)\\)"
+                : "(?:\\s+IN\\s*\\(([-0-9,\\s]+)\\)|\\s*=\\s*(-?[0-9]+))";
+        Matcher matcher = Pattern.compile("(?<![A-Za-z0-9_])" + Pattern.quote(column) + restriction).matcher(where);
         if (!matcher.find()) {
             return null;
         }
-        String values = matcher.group(1);
+        String values = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
         if (matcher.find()) {
             return null; // the same column restricted twice cannot be reduced to one list
         }
@@ -763,11 +785,13 @@ public final class SQLiteColdIndex {
         }
         catch (SQLException exception) {
             // Scratch space ran out, or the copy failed part way. The lookup still has to answer,
-            // so it falls back to live rows alone and says so rather than failing outright.
+            // so it falls back to live rows alone and says so rather than failing outright. This
+            // is a fault, not a page that is too deep, and it is logged as one.
             releaseMaterialized(connection, table);
             if (context != null) {
-                context.outOfReach = true;
+                context.readFailed = true;
             }
+            ErrorReporter.report(exception, true);
             debug("read " + table + ": could not be read (" + exception.getMessage() + "), live rows only");
             return hotTable;
         }
@@ -1337,7 +1361,7 @@ public final class SQLiteColdIndex {
 
             // Reading a scratch copy of tens of millions of rows would exhaust memory or disk, and
             // no page is worth that. The lookup is told the page is out of reach instead.
-            long maximumRows = Config.getGlobal().COLD_MAX_ROWS > 0 ? Config.getGlobal().COLD_MAX_ROWS : DEFAULT_MAXIMUM_ROWS;
+            long maximumRows = maximumRows();
             if (budget > maximumRows) {
                 context.outOfReach = true;
                 debug("read " + table + ": page needs " + budget + " rows, more than the " + maximumRows + " allowed");
