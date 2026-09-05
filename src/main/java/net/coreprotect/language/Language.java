@@ -187,6 +187,7 @@ public class Language {
         phrases.put(Phrase.LOGGING_TIME_LIMIT, "Logging time limit reached. Discarding data and shutting down.");
         phrases.put(Phrase.LOOKUP_FAILED, "The lookup could not be completed. Check the server log for details.");
         phrases.put(Phrase.LOOKUP_PAGE_OUT_OF_REACH, "That page is too far back to display. Narrow the search with t: or r:, or raise \"cold-max-rows\".");
+        phrases.put(Phrase.LOOKUP_COLD_READ_FAILED, "Compressed history could not be read, so only recent rows are shown. Check the server log for details.");
         phrases.put(Phrase.LOOKUP_BLOCK, "{0} {placed|broke} {1}.");
         phrases.put(Phrase.LOOKUP_CONTAINER, "{0} {added|removed} {1} {2}.");
         phrases.put(Phrase.LOOKUP_HEADER, "{0} Lookup Results");

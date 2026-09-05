@@ -84,6 +84,14 @@ public class Lookup extends Queue {
             ErrorReporter.report(e);
         }
         finally {
+            // A count with a predicate the compressed reader cannot evaluate builds its rows into a
+            // temporary table like a page does, and that has to be dropped like a page's is.
+            try {
+                SQLiteColdIndex.endLookup(statement == null ? null : statement.getConnection());
+            }
+            catch (Exception exception) {
+                ErrorReporter.report(exception);
+            }
             if (paused && !Consumer.isPersistenceHalted()) {
                 Consumer.isPaused = false;
             }

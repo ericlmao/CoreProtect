@@ -174,8 +174,9 @@ public class LookupRaw extends Queue {
         if (pageRows != null || count || summary || selectPageRows || limitCount <= 0) {
             return 0;
         }
-        if (Boolean.TRUE.equals(RETRYING_WITHOUT_BUDGET.get())) {
-            return 0;
+        Long retryBudget = RETRY_BUDGET.get();
+        if (retryBudget != null) {
+            return retryBudget;
         }
         return (long) Math.max(0, limitOffset) + limitCount;
     }
@@ -208,8 +209,15 @@ public class LookupRaw extends Queue {
         return new String[] { queryTable };
     }
 
-    /** Set while a lookup is being repeated without a page budget, so it is only repeated once. */
-    private static final ThreadLocal<Boolean> RETRYING_WITHOUT_BUDGET = new ThreadLocal<>();
+    /** The budget a lookup is being repeated with, set while the repeat runs. */
+    private static final ThreadLocal<Long> RETRY_BUDGET = new ThreadLocal<>();
+
+    /**
+     * How much larger each repeat's budget is than the last. A page comes up short when the query
+     * rejects rows the compressed reader accepted, and how many it rejects is not known until it
+     * has run, so the read widens by this factor each time rather than jumping to everything.
+     */
+    private static final long RETRY_GROWTH = 32;
 
     private static List<Object[]> performLookupRaw(Statement statement, CommandSender user, List<String> checkUuids, List<String> checkUsers, List<Object> restrictList, Map<Object, Boolean> excludeList, List<String> excludeUserList, List<Integer> actionList, EntityActionFilter entityActionFilter, List<String> messageFilters, EntityLookupContext entityContext, Location location, Integer[] radius, Long[] rowData, long startTime, long endTime, int limitOffset, int limitCount, boolean restrictWorld, boolean lookup, Integer entityContainerId, LookupRollbackState rollbackState, Map<Integer, List<Long>> pageRows, boolean managePause) {
         List<Object[]> list = new ArrayList<>();
@@ -405,6 +413,14 @@ public class LookupRaw extends Queue {
             }
             results.close();
 
+            if (SQLiteColdIndex.readFailed()) {
+                // The compressed rows could not be read, which has been reported to the log. The
+                // rows the live table holds are still shown, and the user is told the rest is
+                // missing rather than being shown a page that quietly is.
+                Chat.sendMessage(user, Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.LOOKUP_COLD_READ_FAILED));
+                return list;
+            }
+
             if (SQLiteColdIndex.isOutOfReach()) {
                 // The page reaches further back than a single lookup is allowed to read. Say so
                 // rather than returning a page that would silently be missing rows.
@@ -416,15 +432,25 @@ public class LookupRaw extends Queue {
             // is limitCount rows. Comparing against the budget would treat every later page as
             // short and re-read the whole history.
             if (pageBudget > 0 && SQLiteColdIndex.wasTruncated() && list.size() < limitCount) {
-                SQLiteColdIndex.debug("page came up short (" + list.size() + " of " + limitCount + "), reading everything");
-                // The compressed rows that were read did not fill the page, so read them all. The
-                // flag keeps this to a single retry.
-                RETRYING_WITHOUT_BUDGET.set(Boolean.TRUE);
+                long maximumRows = SQLiteColdIndex.maximumRows();
+                if (pageBudget >= maximumRows) {
+                    // As much has been read as one lookup may read and the page is still not
+                    // full. What was found is the newest of it, so it is shown, and the user is
+                    // told the rest is out of reach.
+                    SQLiteColdIndex.debug("page came up short (" + list.size() + " of " + limitCount + ") after reading the " + maximumRows + " rows allowed");
+                    Chat.sendMessage(user, Color.DARK_AQUA + "CoreProtect " + Color.WHITE + "- " + Phrase.build(Phrase.LOOKUP_PAGE_OUT_OF_REACH));
+                    return list;
+                }
+
+                // The compressed rows that were read did not fill the page, so read further back.
+                long retryBudget = Math.min(maximumRows, pageBudget * RETRY_GROWTH);
+                SQLiteColdIndex.debug("page came up short (" + list.size() + " of " + limitCount + "), reading " + retryBudget + " rows");
+                RETRY_BUDGET.set(retryBudget);
                 try {
                     return performLookupRaw(statement, user, checkUuids, checkUsers, restrictList, excludeList, excludeUserList, actionList, entityActionFilter, messageFilters, entityContext, location, radius, rowData, startTime, endTime, limitOffset, limitCount, restrictWorld, lookup, entityContainerId, rollbackState, pageRows, false);
                 }
                 finally {
-                    RETRYING_WITHOUT_BUDGET.remove();
+                    RETRY_BUDGET.remove();
                 }
             }
         }
@@ -938,33 +964,30 @@ public class LookupRaw extends Queue {
                 }
             }
 
-            // The compressed reader evaluates world, coordinates, time, user, type and action
-            // itself. Anything else in the query means it cannot be trusted to count on its own,
-            // and this is decided from the request rather than from the assembled query so that a
-            // deep page can be planned before any of it is built.
-            boolean unmodelledPredicate = (validAction && entityActionFilter != EntityActionFilter.DEFAULT)
-                    || uuids.length() > 0
-                    || (messageFilters != null && !messageFilters.isEmpty())
-                    || (rollbackState != null && rollbackState != LookupRollbackState.ANY)
-                    || actionList.contains(LookupActions.SIGN)
-                    || (radius == null && actionList.contains(5) && entityContainerId == null);
-
             String actionPredicate = "";
             String modelledActions = null;
             if (validAction) {
                 actionPredicate = buildActionPredicate(action, actionList, entityActionFilter);
                 queryBlock = queryBlock + " " + actionPredicate + " AND";
-                if (entityActionFilter == EntityActionFilter.DEFAULT) {
+                if (actionPredicate.equals("action IN(" + action + ")")) {
                     // A plain list of actions is something the compressed reader can apply itself.
                     modelledActions = action;
-                }
-                else {
-                    unmodelledPredicate = true;
                 }
             }
             else if (inventoryQuery || actionExclude.length() > 0 || includeBlock.length() > 0 || includeEntity.length() > 0 || excludeBlock.length() > 0 || excludeEntity.length() > 0) {
                 queryBlock = queryBlock + " action NOT IN(-1) AND";
             }
+
+            // The compressed reader evaluates world, coordinates, time, user, type and action
+            // itself. Anything else in the query means it cannot be trusted to count on its own,
+            // and this is decided from the request rather than from the assembled query so that a
+            // deep page can be planned before any of it is built.
+            boolean unmodelledPredicate = (validAction && modelledActions == null)
+                    || uuids.length() > 0
+                    || (messageFilters != null && !messageFilters.isEmpty())
+                    || (rollbackState != null && rollbackState != LookupRollbackState.ANY)
+                    || actionList.contains(LookupActions.SIGN)
+                    || (radius == null && actionList.contains(5) && entityContainerId == null);
 
             if (includeBlock.length() > 0 || includeEntity.length() > 0) {
                 queryBlock = queryBlock + " type IN(" + (includeBlock.length() > 0 ? includeBlock : "0") + ") AND";
@@ -1019,7 +1042,7 @@ public class LookupRaw extends Queue {
             // timestamp and reducing its offset by exactly how many matching rows lie above it.
             long unionSkipped = 0;
             if (!count && !summary && !selectPageRows && pageRows == null && limitCount > 0 && !unmodelledPredicate
-                    && ConfigHandler.databaseType.isSQLite() && !Boolean.TRUE.equals(RETRYING_WITHOUT_BUDGET.get())) {
+                    && ConfigHandler.databaseType.isSQLite() && RETRY_BUDGET.get() == null) {
                 try {
                     String[] planTables = unionTables(actionList, lookup, queryTable);
                     if (planTables.length > 1) {
@@ -1034,7 +1057,7 @@ public class LookupRaw extends Queue {
                                 ? (excludeBlock.length() > 0 ? excludeBlock : "0")
                                 : null;
                         ColdUnionPlan plan = ColdUnionPlan.forPage(statement.getConnection(), planTables, users, includeBlock,
-                                validAction && entityActionFilter == EntityActionFilter.DEFAULT ? action : null,
+                                modelledActions,
                                 excludeUsers.length() > 0 ? excludeUsers : null, excludedTypes, excludedActions,
                                 startTime, endTime, limitOffset);
                         if (plan.isPlanned()) {
@@ -1046,7 +1069,7 @@ public class LookupRaw extends Queue {
                             queryBlock = queryBlock + " time <= '" + endTime + "' AND";
                             SQLiteColdIndex.beginLookup(startTime, endTime);
                             SQLiteColdIndex.setRowBudget(pageBudget(pageRows, limitOffset, limitCount, count, summary, selectPageRows));
-                            SQLiteColdIndex.setLookupFilters(users, includeBlock, validAction && entityActionFilter == EntityActionFilter.DEFAULT ? action : null);
+                            SQLiteColdIndex.setLookupFilters(users, includeBlock, modelledActions);
                         }
                     }
                 }
@@ -1591,7 +1614,11 @@ public class LookupRaw extends Queue {
     }
 
     private static String buildActionPredicate(String actions, List<Integer> actionList, EntityActionFilter entityActionFilter) {
-        if (entityActionFilter == EntityActionFilter.DEFAULT) {
+        // Item and container transactions number their actions separately from block changes: a
+        // pickup shares its number with an entity kill and a drop with an interaction. Nothing
+        // about entities applies to those tables, so their list is used exactly as it was built.
+        boolean inventoryActions = actionList.contains(LookupActions.ITEM) || actionList.contains(LookupActions.CONTAINER) || actionList.contains(5);
+        if (entityActionFilter == EntityActionFilter.DEFAULT || inventoryActions) {
             return "action IN(" + actions + ")";
         }
 
@@ -1611,6 +1638,9 @@ public class LookupRaw extends Queue {
         addEntityActionPredicate(predicates, LookupActions.ENTITY_KILL, entityActionFilter.includesVehicleKill(actionList, false), entityActionFilter.includesKilledEntity(actionList, false), placedEntityTypes);
         if (predicates.isEmpty()) {
             return "action IN(-1)";
+        }
+        if (predicates.size() == 1) {
+            return predicates.get(0);
         }
         return "(" + String.join(" OR ", predicates) + ")";
     }

@@ -77,6 +77,9 @@ class ColdPredicateTest {
         assertNull(SQLiteColdIndex.listedValues("user IN(1) AND time > 5", "action", false), "a column that is not restricted");
         assertNull(SQLiteColdIndex.listedValues("rolled_back IN(1)", "back", false), "part of a longer column name");
         assertNull(SQLiteColdIndex.listedValues("type IN(1) AND type IN(2)", "type", false), "one column restricted twice");
+        assertEquals("3", SQLiteColdIndex.listedValues("(action=3 AND type NOT IN(1,2)) AND time > 5", "action", false), "a single action by equality");
+        assertNull(SQLiteColdIndex.listedValues("action!=13 AND time > 5", "action", false), "an inequality restricts nothing");
+        assertNull(SQLiteColdIndex.listedValues("action=3 AND action IN(1,2)", "action", false), "equality and a list together");
     }
 
     @Test
