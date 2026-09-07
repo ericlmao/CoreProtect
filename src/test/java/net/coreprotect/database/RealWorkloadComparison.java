@@ -127,6 +127,7 @@ class RealWorkloadComparison {
     private long copyBlocks(Connection duck, Path target, long shift, boolean modern) throws Exception {
         if (modern) {
             ConfigHandler.path = target.getParent().toString() + "/";
+            ConfigHandler.storagePath = target.getParent();
             ConfigHandler.sqlite = target.getFileName().toString();
             SQLiteSchema.prepareDatabaseFile();
         }

@@ -2,6 +2,8 @@ package net.coreprotect.config;
 
 import java.io.File;
 import java.io.RandomAccessFile;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -57,6 +59,7 @@ import net.coreprotect.model.lookup.LookupRollbackState;
 import net.coreprotect.paper.PaperAdapter;
 import net.coreprotect.patch.Patch;
 import net.coreprotect.spigot.SpigotAdapter;
+import net.coreprotect.storage.StorageFiles;
 import net.coreprotect.utility.Chat;
 import net.coreprotect.utility.Color;
 import net.coreprotect.utility.EntitySpawnTracking;
@@ -89,9 +92,19 @@ public class ConfigHandler extends Queue {
     public static final String MINECRAFT_VERSION = "1.16.5";
     public static final String PATCH_VERSION = "24.0";
     public static final String LATEST_VERSION = "26.2";
+    /** The plugin data folder, which holds configuration and nothing else. */
     public static String path = "plugins/CoreProtect/";
-    public static String sqlite = "database.db";
-    public static String duckdb = "database.duckdb";
+    /**
+     * The server-root directory holding every file CoreProtect persists.
+     *
+     * <p>
+     * Set from the data folder during {@code onLoad}. The default here is only used by code that
+     * runs without a server, such as the tests.
+     * </p>
+     */
+    public static Path storagePath = Paths.get("storage", "CoreProtect");
+    public static String sqlite = StorageFiles.SQLITE;
+    public static String duckdb = StorageFiles.DUCKDB;
     public static String duckdbMemoryLimit = "512MB";
     public static String duckdbMaxTempDirectorySize = "10GB";
     public static int duckdbThreads = 3;
@@ -389,8 +402,12 @@ public class ConfigHandler extends Queue {
         File configFolder = new File(ConfigHandler.path);
         File configFile = new File(configFolder, ConfigFile.CONFIG);
         File[] existingFiles = configFolder.listFiles();
+        File[] existingStorage = ConfigHandler.storagePath.toFile().listFiles();
+        // Falling back to SQLite rewrites the configured engine, so it is only ever offered on an
+        // installation that has never run: one with no configuration and no storage of its own.
         duckDBFallbackAllowed = !configFile.exists()
-                && (!configFolder.exists() || (existingFiles != null && existingFiles.length == 0));
+                && (!configFolder.exists() || (existingFiles != null && existingFiles.length == 0))
+                && (existingStorage == null || existingStorage.length == 0);
 
         Config.init();
         ConfigFile.init(ConfigFile.LANGUAGE); // load user phrases
@@ -492,12 +509,12 @@ public class ConfigHandler extends Queue {
                 }
 
                 if (!canExecute) {
-                    File tempFolder = new File("cache");
+                    File tempFolder = ConfigHandler.storagePath.resolve(StorageFiles.TEMPORARY_DIRECTORY).toFile();
                     boolean exists = tempFolder.exists();
                     if (!exists) {
-                        tempFolder.mkdir();
+                        tempFolder.mkdirs();
                     }
-                    System.setProperty("java.io.tmpdir", "cache");
+                    System.setProperty("java.io.tmpdir", tempFolder.getAbsolutePath());
                 }
 
                 tempFile.delete();
@@ -591,7 +608,7 @@ public class ConfigHandler extends Queue {
         boolean walEnabled = !Config.getGlobal().DISABLE_WAL;
         HikariConfig config = new HikariConfig();
         config.setPoolName("CoreProtect-SQLite");
-        config.setJdbcUrl("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+        config.setJdbcUrl("jdbc:sqlite:" + ConfigHandler.storagePath.resolve(ConfigHandler.sqlite));
         // SQLite allows a single writer, plus concurrent readers while write-ahead logging is enabled.
         config.setMaximumPoolSize(walEnabled ? Math.max(2, Math.min(ConfigHandler.maximumPoolSize, 5)) : 1);
         config.setMinimumIdle(1);

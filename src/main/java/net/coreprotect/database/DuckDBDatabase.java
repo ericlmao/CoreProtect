@@ -29,7 +29,7 @@ final class DuckDBDatabase {
         }
 
         Class.forName("org.duckdb.DuckDBDriver");
-        File databaseFile = new File(ConfigHandler.path, ConfigHandler.duckdb);
+        File databaseFile = ConfigHandler.storagePath.resolve(ConfigHandler.duckdb).toFile();
         File parent = databaseFile.getParentFile();
         if (parent != null) {
             parent.mkdirs();

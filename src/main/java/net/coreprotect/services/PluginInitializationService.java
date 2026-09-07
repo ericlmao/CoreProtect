@@ -100,12 +100,18 @@ public class PluginInitializationService {
     }
 
     /**
-     * Creates the plugin data directory if it doesn't exist
+     * Creates the configuration and storage directories if they don't exist
      */
     private static void createDataDirectory() {
         boolean exists = (new File(ConfigHandler.path)).exists();
         if (!exists) {
             new File(ConfigHandler.path).mkdir();
+        }
+
+        // Storage sits outside the plugin folder, so its parent may not exist either.
+        File storageFolder = ConfigHandler.storagePath.toFile();
+        if (!storageFolder.exists()) {
+            storageFolder.mkdirs();
         }
     }
 

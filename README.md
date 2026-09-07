@@ -66,6 +66,7 @@ To support the project and obtain a donation key, visit [coreprotect.net/donate]
 * Multi-threaded to ensure server performance is never impacted.
 * No configuration required. Install the plugin, and you're good to go.
 * Embedded DuckDB columnar storage by default, with optional ClickHouse, SQLite, and MySQL support.
+* Databases and credentials kept in `storage/CoreProtect/`, so the plugin folder holds configuration alone.
 * Supports Bukkit, Spigot, Paper, Folia, MultiPaper, and more.
 * Permission system support and advanced lookup permissions.
 * Easy-to-use commands and inspector.

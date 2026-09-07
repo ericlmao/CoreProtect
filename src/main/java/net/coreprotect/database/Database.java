@@ -859,7 +859,7 @@ public class Database extends Queue {
         }
         // Opened without the pool, and so without anything the pool would have set. A connection
         // with no time to wait for a lock gives up the instant anything else is writing.
-        Connection connection = DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+        Connection connection = DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.storagePath.resolve(ConfigHandler.sqlite));
         try (Statement statement = connection.createStatement()) {
             statement.executeUpdate("PRAGMA busy_timeout=30000");
             statement.executeUpdate("PRAGMA temp_store=FILE");
@@ -1449,7 +1449,7 @@ public class Database extends Queue {
                 String attachDatabase = "";
 
                 if (purge && forceConnection == null) {
-                    String query = "ATTACH DATABASE '" + ConfigHandler.path + ConfigHandler.sqlite + ".tmp' AS tmp_db";
+                    String query = "ATTACH DATABASE '" + ConfigHandler.storagePath.resolve(ConfigHandler.sqlite + ".tmp") + "' AS tmp_db";
                     try (PreparedStatement preparedStatement = connection.prepareStatement(query)) {
                         preparedStatement.execute();
                     }

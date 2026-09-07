@@ -62,6 +62,7 @@ class RealCompactRun {
         ConfigHandler.databaseType = DatabaseType.SQLITE;
         ConfigHandler.prefix = "co_";
         ConfigHandler.path = DATABASE.getParent().toString() + java.io.File.separator;
+        ConfigHandler.storagePath = DATABASE.getParent();
         ConfigHandler.sqlite = DATABASE.getFileName().toString();
         ConfigHandler.serverRunning = true;
         // What a server runs with by default: a file that is mostly free space is written out afresh

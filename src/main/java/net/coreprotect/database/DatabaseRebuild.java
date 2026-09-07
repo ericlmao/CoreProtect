@@ -114,7 +114,7 @@ public final class DatabaseRebuild {
             return;
         }
 
-        Path database = Paths.get(ConfigHandler.path, ConfigHandler.sqlite);
+        Path database = ConfigHandler.storagePath.resolve(ConfigHandler.sqlite);
         if (!Files.isRegularFile(database)) {
             return;
         }

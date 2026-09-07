@@ -22,12 +22,19 @@ import org.bukkit.World;
 import net.coreprotect.CoreProtect;
 import net.coreprotect.consumer.Consumer;
 import net.coreprotect.language.Language;
+import net.coreprotect.storage.LegacyDatabaseConfiguration;
+import net.coreprotect.storage.StorageFiles;
 import net.coreprotect.thread.Scheduler;
 
 public class Config extends Language {
 
     private static final Map<String, String[]> HEADERS = new HashMap<>();
     private static final Map<String, String> DEFAULT_VALUES = new LinkedHashMap<>();
+    /**
+     * The settings that live in the storage directory rather than in the plugin folder, because
+     * they select a database engine and carry the credentials used to reach an external one.
+     */
+    private static final Map<String, String> DATABASE_VALUES = new LinkedHashMap<>();
     private static final Map<String, Config> CONFIG_BY_WORLD_NAME = new HashMap<>();
     private static final String DEFAULT_FILE_HEADER = "# CoreProtect Config";
     public static final String LINE_SEPARATOR = "\n";
@@ -121,19 +128,28 @@ public class Config extends Language {
     public int MAX_RADIUS;
 
     static {
-        DEFAULT_VALUES.put("database-type", "duckdb");
-        DEFAULT_VALUES.put("table-prefix", "co_");
-        DEFAULT_VALUES.put("mysql-host", "127.0.0.1");
-        DEFAULT_VALUES.put("mysql-port", "3306");
-        DEFAULT_VALUES.put("mysql-database", "database");
-        DEFAULT_VALUES.put("mysql-username", "root");
-        DEFAULT_VALUES.put("mysql-password", "");
-        DEFAULT_VALUES.put("clickhouse-host", "127.0.0.1");
-        DEFAULT_VALUES.put("clickhouse-port", "8123");
-        DEFAULT_VALUES.put("clickhouse-database", "default");
-        DEFAULT_VALUES.put("clickhouse-username", "default");
-        DEFAULT_VALUES.put("clickhouse-password", "");
-        DEFAULT_VALUES.put("clickhouse-tls", "false");
+        DATABASE_VALUES.put("database-type", "duckdb");
+        DATABASE_VALUES.put("table-prefix", "co_");
+        DATABASE_VALUES.put("mysql-host", "127.0.0.1");
+        DATABASE_VALUES.put("mysql-port", "3306");
+        DATABASE_VALUES.put("mysql-database", "database");
+        DATABASE_VALUES.put("mysql-username", "root");
+        DATABASE_VALUES.put("mysql-password", "");
+        DATABASE_VALUES.put("clickhouse-host", "127.0.0.1");
+        DATABASE_VALUES.put("clickhouse-port", "8123");
+        DATABASE_VALUES.put("clickhouse-database", "default");
+        DATABASE_VALUES.put("clickhouse-username", "default");
+        DATABASE_VALUES.put("clickhouse-password", "");
+        DATABASE_VALUES.put("clickhouse-tls", "false");
+
+        // A key written to one file and migrated out of the other would be re-added on every boot.
+        for (final String key : DATABASE_VALUES.keySet()) {
+            if (!StorageFiles.DATABASE_KEYS.contains(key)) {
+                throw new IllegalStateException("Database setting '" + key
+                        + "' is written to the storage directory but is not migrated out of the plugin folder");
+            }
+        }
+
         DEFAULT_VALUES.put("duckdb-memory-limit", "512MB");
         DEFAULT_VALUES.put("duckdb-threads", "3");
         DEFAULT_VALUES.put("duckdb-max-temp-directory-size", "10GB");
@@ -362,6 +378,14 @@ public class Config extends Language {
         this.defaults = defaults;
     }
 
+    /**
+     * @return the shipped default for a key, whichever of the two configuration files owns it
+     */
+    private static String defaultValue(final String key) {
+        final String configured = DEFAULT_VALUES.get(key);
+        return configured != null ? configured : DATABASE_VALUES.get(key);
+    }
+
     private String get(final String key, final String dfl) {
         String configured = this.config.get(key);
         if (configured == null) {
@@ -369,10 +393,10 @@ public class Config extends Language {
                 return dfl;
             }
             if (this.defaults == null) {
-                configured = DEFAULT_VALUES.get(key);
+                configured = defaultValue(key);
             }
             else {
-                configured = this.defaults.config.getOrDefault(key, DEFAULT_VALUES.get(key));
+                configured = this.defaults.config.getOrDefault(key, defaultValue(key));
             }
         }
         return configured;
@@ -522,23 +546,27 @@ public class Config extends Language {
 
         final Map<String, byte[]> map = new HashMap<>();
         final File globalFile = new File(configFolder, fileName);
+        final byte[] globalData;
 
         if (globalFile.exists()) {
             // we always add options to the global config
-            final byte[] data = Files.readAllBytes(globalFile.toPath());
-            map.put("config", data);
+            globalData = Files.readAllBytes(globalFile.toPath());
 
             // can't modify GLOBAL, we're likely off-main here
             final Config temp = new Config();
-            temp.load(new ByteArrayInputStream(data));
+            temp.load(new ByteArrayInputStream(globalData));
             temp.addMissingOptions(globalFile);
         }
         else {
             final Config temp = new Config();
             temp.loadDefaults();
             temp.addMissingOptions(globalFile);
-            map.put("config", Files.readAllBytes(globalFile.toPath()));
+            globalData = Files.readAllBytes(globalFile.toPath());
         }
+
+        // The database settings live in the storage directory, and are read after the plugin
+        // configuration so that the storage copy wins if a stale key is left behind in config.yml.
+        map.put("config", join(globalData, loadDatabaseFile()));
 
         for (final File worldConfigFile : configFolder.listFiles((File file) -> file.getName().endsWith(".yml"))) {
             final String name = worldConfigFile.getName();
@@ -550,6 +578,40 @@ public class Config extends Language {
         }
 
         return map;
+    }
+
+    /**
+     * Reads the database settings from the storage directory, creating the file when it is missing.
+     *
+     * @return the contents of the database configuration
+     */
+    private static byte[] loadDatabaseFile() throws IOException {
+        final File storageFolder = ConfigHandler.storagePath.toFile();
+        if (!storageFolder.exists()) {
+            storageFolder.mkdirs();
+        }
+
+        final File databaseFile = new File(storageFolder, StorageFiles.DATABASE_CONFIGURATION);
+        final Config temp = new Config();
+        if (databaseFile.exists()) {
+            final byte[] data = Files.readAllBytes(databaseFile.toPath());
+            temp.load(new ByteArrayInputStream(data));
+            temp.addMissingOptions(databaseFile, DATABASE_VALUES, LegacyDatabaseConfiguration.FILE_HEADER);
+            return data;
+        }
+
+        temp.loadDefaults();
+        temp.addMissingOptions(databaseFile, DATABASE_VALUES, LegacyDatabaseConfiguration.FILE_HEADER);
+        return Files.readAllBytes(databaseFile.toPath());
+    }
+
+    private static byte[] join(final byte[] first, final byte[] second) {
+        final byte[] separator = LINE_SEPARATOR.getBytes(StandardCharsets.UTF_8);
+        final byte[] joined = new byte[first.length + separator.length + second.length];
+        System.arraycopy(first, 0, joined, 0, first.length);
+        System.arraycopy(separator, 0, joined, first.length, separator.length);
+        System.arraycopy(second, 0, joined, first.length + separator.length, second.length);
+        return joined;
     }
 
     // this should only be called on the main thread
@@ -624,15 +686,31 @@ public class Config extends Language {
     }
 
     public void addMissingOptions(final File file) throws IOException {
+        this.addMissingOptions(file, DEFAULT_VALUES, DEFAULT_FILE_HEADER);
+    }
+
+    /**
+     * Appends every setting the file does not already carry.
+     *
+     * @param file
+     *            the configuration file to complete
+     * @param values
+     *            the settings that file owns, with their shipped defaults
+     * @param fileHeader
+     *            the comment written above a file being created from nothing
+     * @throws IOException
+     *             if the file cannot be written
+     */
+    public void addMissingOptions(final File file, final Map<String, String> values, final String fileHeader) throws IOException {
         final boolean writeHeader = !file.exists() || file.length() == 0;
         try (final FileOutputStream fout = new FileOutputStream(file, true)) {
             OutputStreamWriter out = new OutputStreamWriter(new BufferedOutputStream(fout), StandardCharsets.UTF_8);
             if (writeHeader) {
-                out.append(DEFAULT_FILE_HEADER);
+                out.append(fileHeader);
                 out.append(LINE_SEPARATOR);
             }
 
-            for (final Map.Entry<String, String> entry : DEFAULT_VALUES.entrySet()) {
+            for (final Map.Entry<String, String> entry : values.entrySet()) {
                 final String key = entry.getKey();
                 String defaultValue = entry.getValue();
 

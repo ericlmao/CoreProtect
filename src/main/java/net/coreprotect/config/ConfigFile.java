@@ -26,13 +26,14 @@ import java.util.TreeMap;
 import net.coreprotect.CoreProtect;
 import net.coreprotect.language.Language;
 import net.coreprotect.language.Phrase;
+import net.coreprotect.storage.StorageFiles;
 import net.coreprotect.utility.ErrorReporter;
 
 public class ConfigFile extends Config {
 
     public static final String CONFIG = "config.yml";
     public static final String LANGUAGE = "language.yml";
-    public static final String LANGUAGE_CACHE = ".language";
+    public static final String LANGUAGE_CACHE = StorageFiles.LANGUAGE_CACHE;
 
     private static final TreeMap<String, String> DEFAULT_VALUES = new TreeMap<>();
     private static final TreeMap<String, String> USER_VALUES = new TreeMap<>();
@@ -117,8 +118,10 @@ public class ConfigFile extends Config {
     }
 
     private static Map<String, byte[]> loadFiles(String fileName, boolean isCache) throws IOException {
-        final CoreProtect plugin = CoreProtect.getInstance();
-        final File configFolder = plugin.getDataFolder();
+        // The translation cache is written by CoreProtect rather than by an operator, so it lives
+        // in the storage directory; the language file an operator edits stays in the data folder.
+        final File configFolder = isCache ? ConfigHandler.storagePath.toFile()
+                : CoreProtect.getInstance().getDataFolder();
         if (!configFolder.exists()) {
             configFolder.mkdirs();
         }
@@ -228,7 +231,7 @@ public class ConfigFile extends Config {
     }
 
     public static void resetCache(String cacheName, String fileName) throws IOException {
-        File file = new File(CoreProtect.getInstance().getDataFolder(), cacheName);
+        File file = new File(ConfigHandler.storagePath.toFile(), cacheName);
         if (file.length() > 0) {
             new FileOutputStream(file).close();
             init(fileName);

@@ -25,13 +25,16 @@ import net.coreprotect.config.ConfigHandler;
 class SQLiteSchemaTest {
 
     private String previousPath;
+    private Path previousStorage;
     private String previousFile;
 
     @BeforeEach
     void configure(@TempDir Path directory) {
         previousPath = ConfigHandler.path;
+        previousStorage = ConfigHandler.storagePath;
         previousFile = ConfigHandler.sqlite;
         ConfigHandler.path = directory.toString() + "/";
+        ConfigHandler.storagePath = directory;
         ConfigHandler.sqlite = "database.db";
         ConfigHandler.prefix = "co_";
     }
@@ -39,6 +42,7 @@ class SQLiteSchemaTest {
     @AfterEach
     void restore() {
         ConfigHandler.path = previousPath;
+        ConfigHandler.storagePath = previousStorage;
         ConfigHandler.sqlite = previousFile;
     }
 

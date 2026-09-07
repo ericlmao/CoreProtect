@@ -3,7 +3,6 @@ package net.coreprotect.database;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -26,6 +25,7 @@ import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
 import net.coreprotect.patch.Patch;
+import net.coreprotect.storage.StorageFiles;
 import net.coreprotect.utility.Chat;
 import net.coreprotect.utility.Color;
 import net.coreprotect.utility.ErrorReporter;
@@ -60,8 +60,8 @@ import net.coreprotect.utility.VersionUtils;
  */
 public final class LegacyImport {
 
-    /** The file the import reads, in the plugin folder. */
-    private static final String SOURCE_FILE = "old.db";
+    /** The file the import reads, in the storage directory. */
+    private static final String SOURCE_FILE = StorageFiles.LEGACY_IMPORT;
 
     /** The schema name the source database is attached under. */
     private static final String LEGACY = "legacy";
@@ -174,7 +174,7 @@ public final class LegacyImport {
             return false;
         }
 
-        Path source = Paths.get(ConfigHandler.path + SOURCE_FILE);
+        Path source = ConfigHandler.storagePath.resolve(SOURCE_FILE);
         if (!Files.exists(source)) {
             return false;
         }
@@ -309,7 +309,7 @@ public final class LegacyImport {
         Connection connection = null;
         long imported = 0;
         try {
-            Path source = Paths.get(ConfigHandler.path + SOURCE_FILE);
+            Path source = ConfigHandler.storagePath.resolve(SOURCE_FILE);
             connection = openConnection();
             attach(connection, source);
 
@@ -833,7 +833,7 @@ public final class LegacyImport {
     private static void warnAboutFreeSpace(Path source) {
         try {
             long needed = Files.size(source);
-            long available = Files.getFileStore(Paths.get(ConfigHandler.path).toAbsolutePath()).getUsableSpace();
+            long available = Files.getFileStore(ConfigHandler.storagePath.toAbsolutePath()).getUsableSpace();
             if (available < needed) {
                 Chat.console(Color.YELLOW + "[CoreProtect] " + Phrase.build(Phrase.IMPORT_LOW_DISK_SPACE,
                         ColdStorageStats.format(needed), ColdStorageStats.format(available)));
@@ -883,7 +883,7 @@ public final class LegacyImport {
     }
 
     private static Connection openConnection() throws SQLException {
-        Connection connection = DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.path + ConfigHandler.sqlite);
+        Connection connection = DriverManager.getConnection("jdbc:sqlite:" + ConfigHandler.storagePath.resolve(ConfigHandler.sqlite));
         try (Statement statement = connection.createStatement()) {
             statement.executeUpdate("PRAGMA busy_timeout=30000");
         }
