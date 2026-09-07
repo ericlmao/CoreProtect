@@ -52,6 +52,7 @@ class DatabaseRebuildTest {
     private Path database;
     private DatabaseType previousType;
     private String previousPath;
+    private Path previousStorage;
     private String previousFile;
 
     @BeforeAll
@@ -67,10 +68,12 @@ class DatabaseRebuildTest {
     void openDatabase(@TempDir Path directory) throws SQLException {
         previousType = ConfigHandler.databaseType;
         previousPath = ConfigHandler.path;
+        previousStorage = ConfigHandler.storagePath;
         previousFile = ConfigHandler.sqlite;
         ConfigHandler.databaseType = DatabaseType.SQLITE;
         ConfigHandler.prefix = "co_";
         ConfigHandler.path = directory.toString() + java.io.File.separator;
+        ConfigHandler.storagePath = directory;
         ConfigHandler.sqlite = "database.db";
         Config.getGlobal().COMPACT_REBUILD = true;
         SQLiteColdIndex.invalidate();
@@ -92,6 +95,7 @@ class DatabaseRebuildTest {
     void restoreSettings() {
         ConfigHandler.databaseType = previousType;
         ConfigHandler.path = previousPath;
+        ConfigHandler.storagePath = previousStorage;
         ConfigHandler.sqlite = previousFile;
         SQLiteColdIndex.invalidate();
     }

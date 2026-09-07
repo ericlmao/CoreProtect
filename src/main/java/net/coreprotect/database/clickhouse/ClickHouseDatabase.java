@@ -1,7 +1,6 @@
 package net.coreprotect.database.clickhouse;
 
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -53,7 +52,7 @@ public final class ClickHouseDatabase implements AutoCloseable {
     }
 
     public static ClickHouseDatabase initialize(ClickHouseJdbcConfig config, String prefix) throws SQLException {
-        return initialize(config, prefix, Paths.get(ConfigHandler.path));
+        return initialize(config, prefix, ConfigHandler.storagePath);
     }
 
     public static ClickHouseDatabase initialize(ClickHouseJdbcConfig config, String prefix, Path controlDirectory) throws SQLException {

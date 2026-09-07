@@ -49,6 +49,7 @@ class LegacyImportTest {
     private Connection connection;
     private DatabaseType previousType;
     private String previousPath;
+    private Path previousStorage;
     private String previousFile;
     private boolean previousRunning;
 
@@ -68,12 +69,14 @@ class LegacyImportTest {
 
         previousType = ConfigHandler.databaseType;
         previousPath = ConfigHandler.path;
+        previousStorage = ConfigHandler.storagePath;
         previousFile = ConfigHandler.sqlite;
         previousRunning = ConfigHandler.serverRunning;
 
         ConfigHandler.databaseType = DatabaseType.SQLITE;
         ConfigHandler.prefix = "co_";
         ConfigHandler.path = directory.toString() + File.separator;
+        ConfigHandler.storagePath = directory;
         ConfigHandler.sqlite = "database.db";
         ConfigHandler.serverRunning = true;
         ConfigHandler.migrationRunning = false;
@@ -91,6 +94,7 @@ class LegacyImportTest {
         SegmentDictionary.clearCache();
         ConfigHandler.databaseType = previousType;
         ConfigHandler.path = previousPath;
+        ConfigHandler.storagePath = previousStorage;
         ConfigHandler.sqlite = previousFile;
         ConfigHandler.serverRunning = previousRunning;
         ConfigHandler.migrationRunning = false;

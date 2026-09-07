@@ -3,7 +3,6 @@ package net.coreprotect.database;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -44,7 +43,7 @@ public final class SQLiteSchema {
      * @return the path of the configured SQLite database file
      */
     public static Path databaseFile() {
-        return Paths.get(ConfigHandler.path + ConfigHandler.sqlite);
+        return ConfigHandler.storagePath.resolve(ConfigHandler.sqlite);
     }
 
     /**

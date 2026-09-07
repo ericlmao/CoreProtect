@@ -125,6 +125,7 @@ class ColdStorageBenchmark {
             // The version 2 layout chooses file level settings before anything is written, which is
             // what the plugin does on a new database.
             ConfigHandler.path = database.getParent().toString() + "/";
+            ConfigHandler.storagePath = database.getParent();
             ConfigHandler.sqlite = database.getFileName().toString();
             SQLiteSchema.prepareDatabaseFile();
         }

@@ -7,7 +7,6 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.AclFileAttributeView;
@@ -20,6 +19,7 @@ import java.util.Arrays;
 import java.util.Locale;
 
 import net.coreprotect.database.DatabaseType;
+import net.coreprotect.storage.StorageFiles;
 
 public final class DatabaseConfigWriter {
 
@@ -28,9 +28,9 @@ public final class DatabaseConfigWriter {
     }
 
     public static synchronized void persistDatabaseType(DatabaseType type) throws IOException {
-        Path configFile = Paths.get(ConfigHandler.path).resolve(ConfigFile.CONFIG);
+        Path configFile = ConfigHandler.storagePath.resolve(StorageFiles.DATABASE_CONFIGURATION);
         if (!Files.isRegularFile(configFile, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("CoreProtect config is not a regular file: " + configFile);
+            throw new IOException("CoreProtect database config is not a regular file: " + configFile);
         }
 
         byte[] original = Files.readAllBytes(configFile);
@@ -41,10 +41,10 @@ public final class DatabaseConfigWriter {
 
         Path directory = configFile.toAbsolutePath().getParent();
         if (directory == null) {
-            throw new IOException("CoreProtect config has no parent directory: " + configFile);
+            throw new IOException("CoreProtect database config has no parent directory: " + configFile);
         }
 
-        Path temporary = Files.createTempFile(directory, ".config.yml.", ".tmp");
+        Path temporary = Files.createTempFile(directory, "." + StorageFiles.DATABASE_CONFIGURATION + ".", ".tmp");
         boolean moved = false;
         try {
             Files.write(temporary, updated, StandardOpenOption.TRUNCATE_EXISTING);
@@ -56,7 +56,7 @@ public final class DatabaseConfigWriter {
                 Files.move(temporary, configFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             }
             catch (AtomicMoveNotSupportedException exception) {
-                throw new IOException("The CoreProtect config filesystem does not support atomic replacement", exception);
+                throw new IOException("The CoreProtect storage filesystem does not support atomic replacement", exception);
             }
             moved = true;
             forceDirectory(directory);
