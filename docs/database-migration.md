@@ -36,8 +36,8 @@ Prepare the target as follows:
 
 | Target | Preparation |
 | --- | --- |
-| SQLite | Move or archive an existing `plugins/CoreProtect/database.db` if it contains CoreProtect data. CoreProtect creates the file and schema when needed. |
-| DuckDB | `plugins/CoreProtect/database.duckdb` must be a new database file so its row ID sequences can be initialized from the source. |
+| SQLite | Move or archive an existing `storage/CoreProtect/database.db` if it contains CoreProtect data. CoreProtect creates the file and schema when needed. |
+| DuckDB | `storage/CoreProtect/database.duckdb` must be a new database file so its row ID sequences can be initialized from the source. |
 | MySQL | Configure the `mysql-*` options and create the configured database and account. The selected table-prefix namespace must contain no CoreProtect data. |
 | ClickHouse | Use ClickHouse 25.6 or newer, create the configured database with persistent UUID-backed table identities (`Atomic` is the normal self-hosted choice), create the account, configure the `clickhouse-*` options, and use a table-prefix namespace containing no CoreProtect data. |
 
@@ -100,7 +100,7 @@ If target activation or the atomic `config.yml` update fails after verification,
 
 ### Automatic Configuration Update Fails
 
-Check that `plugins/CoreProtect/config.yml` is a regular, writable file on a filesystem that supports atomic replacement. CoreProtect reports the migration as failed and restores the source before persistence resumes. The verified target still contains the copied data, so clean only that failed target namespace before retrying; do not manually select it or delete the source.
+Check that `storage/CoreProtect/database.yml` is a regular, writable file on a filesystem that supports atomic replacement. CoreProtect reports the migration as failed and restores the source before persistence resumes. The verified target still contains the copied data, so clean only that failed target namespace before retrying; do not manually select it or delete the source.
 
 ## Getting Help
 

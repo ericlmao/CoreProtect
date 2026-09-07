@@ -114,6 +114,6 @@ could hold something of it. Segments written before that was recorded gain it on
 
 ## Upgrading an existing database
 
-The layout is not compatible with databases written by upstream CoreProtect, and there is no conversion. On first start, an older database file is renamed to `database.db.v1-<timestamp>` and a new, empty database takes its place. Renaming moves the file rather than copying it, so this needs no extra disk space and nothing is deleted — the old file stays where it is until you remove it yourself.
+The layout is not compatible with databases written by upstream CoreProtect, and there is no conversion. On first start, an older database file in `storage/CoreProtect/` is renamed to `database.db.v1-<timestamp>` and a new, empty database takes its place. Renaming moves the file rather than copying it, so this needs no extra disk space and nothing is deleted — the old file stays where it is until you remove it yourself.
 
 If you want your old history, keep running upstream CoreProtect against the renamed file, or delete it once you no longer need it.

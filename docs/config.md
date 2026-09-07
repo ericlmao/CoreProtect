@@ -2,7 +2,11 @@
 
 The CoreProtect configuration file can be found within the CoreProtect folder, at `config.yml`.
 
+The settings that select a database engine and hold the credentials to reach it are not in that file. They live in `storage/CoreProtect/database.yml`, alongside the databases themselves, so that a plugin folder can be shared without carrying a password. See the [storage directory guide](/storage-directory/) for the full layout and for what happens when you upgrade from a version that kept everything in one place.
+
 ## Database Storage
+
+`database-type` is set in `storage/CoreProtect/database.yml`.
 
 New installations use embedded DuckDB by default. Upgrading an existing SQLite or MySQL installation does not switch it to DuckDB: if `database-type` is absent, CoreProtect derives it from the existing legacy `use-mysql` setting and automatically writes the matching `sqlite` or `mysql` value. No manual change is required. Once present, `database-type` takes precedence over `use-mysql`, and changes take effect after `/co reload` or a restart.
 
@@ -28,9 +32,9 @@ duckdb-threads: 3
 duckdb-max-temp-directory-size: 10GB
 ```
 
-DuckDB stores its data in `plugins/CoreProtect/database.duckdb`; CoreProtect manages it directly, so no DuckDB service is needed. `duckdb-memory-limit` controls the buffer manager, although total native memory can be higher, and `duckdb-threads` limits query threads. `duckdb-max-temp-directory-size` caps spill data without preallocating space or limiting the database file itself. Queries that exceed both memory and available spill space can fail.
+DuckDB stores its data in `storage/CoreProtect/database.duckdb`; CoreProtect manages it directly, so no DuckDB service is needed. `duckdb-memory-limit` controls the buffer manager, although total native memory can be higher, and `duckdb-threads` limits query threads. `duckdb-max-temp-directory-size` caps spill data without preallocating space or limiting the database file itself. Queries that exceed both memory and available spill space can fail.
 
-On a pristine installation where the CoreProtect data folder contains no existing files, CoreProtect verifies that DuckDB's native library can run before creating the database file. If the operating system, architecture, or native runtime is incompatible, CoreProtect records `database-type: sqlite` in the generated `config.yml`, logs a warning, and starts with SQLite instead. Existing or preconfigured installations and explicitly configured DuckDB databases never fall back automatically; an initialization error stops database startup so CoreProtect cannot silently open a separate empty history.
+On a pristine installation, where neither the CoreProtect data folder nor its storage directory contains any existing files, CoreProtect verifies that DuckDB's native library can run before creating the database file. If the operating system, architecture, or native runtime is incompatible, CoreProtect records `database-type: sqlite` in the generated `database.yml`, logs a warning, and starts with SQLite instead. Existing or preconfigured installations and explicitly configured DuckDB databases never fall back automatically; an initialization error stops database startup so CoreProtect cannot silently open a separate empty history.
 
 ### ClickHouse
 

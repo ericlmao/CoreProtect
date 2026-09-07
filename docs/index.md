@@ -20,6 +20,9 @@ A list of all language codes that can be used with CoreProtect.
 [**CoreProtect API Documentation**](/api/)  
 Log your own block changes, perform lookups, rollbacks, restores, and more.  
 
+[**Storage Directory**](/storage-directory/)  
+Where CoreProtect keeps its databases, and what moves there when you upgrade.
+
 [**Database Migration**](/database-migration/)  
 Migrate your CoreProtect database between supported backends.
 
