@@ -1298,176 +1298,174 @@ public final class SQLiteColdIndex {
         String temporary = "cp_cold_" + table;
         String hotTable = ConfigHandler.prefix + table;
 
-        try (Statement statement = connection.createStatement()) {
-            statement.executeUpdate("DROP TABLE IF EXISTS temp." + temporary);
-            statement.executeUpdate("CREATE TEMP TABLE " + temporary + " (" + columnDefinition(layout) + ")");
-        }
-
-        StringBuilder insert = new StringBuilder("INSERT INTO temp." + temporary + " (rowid");
-        for (String column : layout.columns) {
-            insert.append(',').append(column);
-        }
-        insert.append(") VALUES (?");
-        for (int index = 0; index < layout.columns.length; index++) {
-            insert.append(",?");
-        }
-        insert.append(')');
-
-        Map<Long, Integer> overlay = readOverlay(connection, table, selected);
-        int inserted = 0;
-        // One transaction for the whole temporary table: committing every batch separately costs
-        // far more than decoding the rows does.
-        boolean autoCommit = connection.getAutoCommit();
-        if (autoCommit) {
-            connection.setAutoCommit(false);
-        }
-        try (PreparedStatement statement = connection.prepareStatement(insert.toString())) {
-            ColdSegmentCodec.RowFilter rowFilter = rowFilter(layout, worldId, bounds, startTime, endTime, users, types, actions, excluded,
-                    context == null ? null : context.spawns);
-            long budget = context == null ? 0 : context.rowBudget;
-            List<ColdSegment> order = selected;
-
-            // Skip whole segments the page starts after. Their row counts were recorded when they
-            // were sealed, so how many rows they hold for this lookup is known without reading
-            // them, and the query's own offset is reduced by exactly that many.
-            long plannedOffset = context == null ? 0 : context.plannedOffset;
-            if (plannedOffset > 0 && !selected.isEmpty()) {
-                List<ColdSegment> newestFirst = new ArrayList<>(selected);
-                newestFirst.sort(Comparator.comparingLong((ColdSegment segment) -> segment.endRowId).reversed());
-
-                long skippedRows = 0;
-                int skippedSegments = 0;
-                for (ColdSegment segment : newestFirst) {
-                    long rows = exactRows(segment, worldId, bounds, startTime, endTime, users, types, actions, excluded);
-                    if (rows < 0 || skippedRows + rows > plannedOffset) {
-                        // Either the count is not known exactly, or the page starts inside this
-                        // segment. Either way this segment and everything older has to be read.
-                        break;
-                    }
-                    skippedRows = skippedRows + rows;
-                    skippedSegments++;
-                }
-
-                if (skippedSegments > 0) {
-                    order = newestFirst.subList(skippedSegments, newestFirst.size());
-                    selected = order;
-                    context.skipped.put(table, skippedRows);
-                    budget = Math.max(0, budget - skippedRows);
-                    context.rowBudget = budget;
-                    debug("plan " + table + ": skipped " + skippedSegments + " segments holding " + skippedRows
-                            + " rows, offset " + plannedOffset + " -> " + (plannedOffset - skippedRows));
-                }
+        // One transaction for the whole scratch table: committing every batch separately costs far
+        // more than decoding the rows does. The transaction is asked for in SQL, as a savepoint,
+        // rather than through the driver's auto-commit switch. The consumer opens its own
+        // transaction with a plain BEGIN statement that the driver knows nothing about, and a
+        // lookup run from inside one of those batches would have the driver begin a second
+        // transaction, which SQLite refuses. A savepoint nests inside whatever is already open and
+        // folds back into it when released, and on an idle connection it is the transaction, so
+        // releasing it commits.
+        boolean completed = false;
+        beginScratch(connection);
+        try {
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate("DROP TABLE IF EXISTS temp." + temporary);
+                statement.executeUpdate("CREATE TEMP TABLE " + temporary + " (" + columnDefinition(layout) + ")");
             }
 
-            // Reading a scratch copy of tens of millions of rows would exhaust memory or disk, and
-            // no page is worth that. The lookup is told the page is out of reach instead.
-            long maximumRows = maximumRows();
-            if (budget > maximumRows) {
-                context.outOfReach = true;
-                debug("read " + table + ": page needs " + budget + " rows, more than the " + maximumRows + " allowed");
-                try (Statement cleanup = connection.createStatement()) {
-                    cleanup.executeUpdate("DROP TABLE IF EXISTS temp." + temporary);
-                }
-                if (autoCommit) {
-                    connection.setAutoCommit(true);
-                }
-                return hotTable(table);
+            StringBuilder insert = new StringBuilder("INSERT INTO temp." + temporary + " (rowid");
+            for (String column : layout.columns) {
+                insert.append(',').append(column);
             }
+            insert.append(") VALUES (?");
+            for (int index = 0; index < layout.columns.length; index++) {
+                insert.append(",?");
+            }
+            insert.append(')');
 
-            if (budget > 0) {
-                // Newest first, so the rows a page can show are read before anything older.
-                order = new ArrayList<>(selected);
-                order.sort(Comparator.comparingLong((ColdSegment segment) -> segment.endRowId).reversed());
+            Map<Long, Integer> overlay = readOverlay(connection, table, selected);
+            int inserted = 0;
+            try (PreparedStatement statement = connection.prepareStatement(insert.toString())) {
+                ColdSegmentCodec.RowFilter rowFilter = rowFilter(layout, worldId, bounds, startTime, endTime, users, types, actions, excluded,
+                        context == null ? null : context.spawns);
+                long budget = context == null ? 0 : context.rowBudget;
+                List<ColdSegment> order = selected;
 
-                // Where the row counts are known, take exactly the segments the page needs. The
-                // rest are left unread, which is what keeps a page cheap on a long history.
-                long estimated = 0;
-                int needed = 0;
-                boolean countsKnown = true;
-                for (ColdSegment segment : order) {
-                    needed++;
-                    // Only counts that describe this lookup exactly may be trusted here. A segment
-                    // the lookup cuts across holds fewer matching rows than its own count says, and
-                    // trusting it would stop the read before the page was covered.
-                    long rows = exactRows(segment, worldId, bounds, startTime, endTime, users, types, actions, excluded);
-                    if (rows < 0) {
-                        countsKnown = false;
+                // Skip whole segments the page starts after. Their row counts were recorded when they
+                // were sealed, so how many rows they hold for this lookup is known without reading
+                // them, and the query's own offset is reduced by exactly that many.
+                long plannedOffset = context == null ? 0 : context.plannedOffset;
+                if (plannedOffset > 0 && !selected.isEmpty()) {
+                    List<ColdSegment> newestFirst = new ArrayList<>(selected);
+                    newestFirst.sort(Comparator.comparingLong((ColdSegment segment) -> segment.endRowId).reversed());
+
+                    long skippedRows = 0;
+                    int skippedSegments = 0;
+                    for (ColdSegment segment : newestFirst) {
+                        long rows = exactRows(segment, worldId, bounds, startTime, endTime, users, types, actions, excluded);
+                        if (rows < 0 || skippedRows + rows > plannedOffset) {
+                            // Either the count is not known exactly, or the page starts inside this
+                            // segment. Either way this segment and everything older has to be read.
+                            break;
+                        }
+                        skippedRows = skippedRows + rows;
+                        skippedSegments++;
+                    }
+
+                    if (skippedSegments > 0) {
+                        order = newestFirst.subList(skippedSegments, newestFirst.size());
+                        selected = order;
+                        context.skipped.put(table, skippedRows);
+                        budget = Math.max(0, budget - skippedRows);
+                        context.rowBudget = budget;
+                        debug("plan " + table + ": skipped " + skippedSegments + " segments holding " + skippedRows
+                                + " rows, offset " + plannedOffset + " -> " + (plannedOffset - skippedRows));
+                    }
+                }
+
+                // Reading a scratch copy of tens of millions of rows would exhaust memory or disk, and
+                // no page is worth that. The lookup is told the page is out of reach instead.
+                long maximumRows = maximumRows();
+                if (budget > maximumRows) {
+                    context.outOfReach = true;
+                    debug("read " + table + ": page needs " + budget + " rows, more than the " + maximumRows + " allowed");
+                    try (Statement cleanup = connection.createStatement()) {
+                        cleanup.executeUpdate("DROP TABLE IF EXISTS temp." + temporary);
+                    }
+                    completed = true;
+                    return hotTable(table);
+                }
+
+                if (budget > 0) {
+                    // Newest first, so the rows a page can show are read before anything older.
+                    order = new ArrayList<>(selected);
+                    order.sort(Comparator.comparingLong((ColdSegment segment) -> segment.endRowId).reversed());
+
+                    // Where the row counts are known, take exactly the segments the page needs. The
+                    // rest are left unread, which is what keeps a page cheap on a long history.
+                    long estimated = 0;
+                    int needed = 0;
+                    boolean countsKnown = true;
+                    for (ColdSegment segment : order) {
+                        needed++;
+                        // Only counts that describe this lookup exactly may be trusted here. A segment
+                        // the lookup cuts across holds fewer matching rows than its own count says, and
+                        // trusting it would stop the read before the page was covered.
+                        long rows = exactRows(segment, worldId, bounds, startTime, endTime, users, types, actions, excluded);
+                        if (rows < 0) {
+                            countsKnown = false;
+                            break;
+                        }
+                        estimated = estimated + rows;
+                        if (estimated >= budget) {
+                            break;
+                        }
+                    }
+
+                    if (countsKnown && needed < order.size()) {
+                        context.truncated = true;
+                        order = order.subList(0, needed);
+                    }
+                }
+                // A small page can afford to decode several segments at once; a large read cannot.
+                int wave = budget > 0 && budget <= LARGE_READ_ROWS ? DECODE_WAVE : 1;
+                for (int position = 0; position < order.size(); position += wave) {
+                    if (budget > 0 && inserted >= budget) {
+                        context.truncated = true;
                         break;
                     }
-                    estimated = estimated + rows;
-                    if (estimated >= budget) {
+                    if (context != null && context.outOfReach) {
                         break;
                     }
-                }
+                    List<ColdSegment> batch = order.subList(position, Math.min(order.size(), position + wave));
+                    for (ColdSegmentCodec.Rows rows : decodeBatch(connection, batch, rowFilter)) {
+                    for (int row = 0; row < rows.size(); row++) {
+                        long rowId = rows.getRowId(row);
+                        Object[] values = rows.getValues(row);
+                        Integer overlayFlag = layout.rolledBackColumn >= 0 ? overlay.get(rowId) : null;
 
-                if (countsKnown && needed < order.size()) {
-                    context.truncated = true;
-                    order = order.subList(0, needed);
+                        statement.setLong(1, rowId);
+                        for (int column = 0; column < layout.columns.length; column++) {
+                            Object value = column == layout.rolledBackColumn && overlayFlag != null ? Long.valueOf(overlayFlag.longValue()) : values[column];
+                            if (value == null) {
+                                statement.setNull(column + 2, java.sql.Types.NULL);
+                            }
+                            else if (value instanceof byte[]) {
+                                statement.setBytes(column + 2, (byte[]) value);
+                            }
+                            else if (value instanceof String) {
+                                statement.setString(column + 2, (String) value);
+                            }
+                            else if (value instanceof Double) {
+                                statement.setDouble(column + 2, (Double) value);
+                            }
+                            else {
+                                statement.setLong(column + 2, ((Number) value).longValue());
+                            }
+                        }
+                        statement.addBatch();
+                        inserted++;
+                        if (inserted % 2000 == 0) {
+                            statement.executeBatch();
+                        }
+
+                        // The limit is enforced on rows actually written, not only on what the read
+                        // was expected to need, so a read can never grow beyond it whatever happens.
+                        if (inserted > maximumRows) {
+                            context.outOfReach = true;
+                            debug("read " + table + ": stopped after " + inserted + " rows, more than the " + maximumRows + " allowed");
+                            break;
+                        }
+                    }
+                    }
                 }
+                statement.executeBatch();
             }
-            // A small page can afford to decode several segments at once; a large read cannot.
-            int wave = budget > 0 && budget <= LARGE_READ_ROWS ? DECODE_WAVE : 1;
-            for (int position = 0; position < order.size(); position += wave) {
-                if (budget > 0 && inserted >= budget) {
-                    context.truncated = true;
-                    break;
-                }
-                if (context != null && context.outOfReach) {
-                    break;
-                }
-                List<ColdSegment> batch = order.subList(position, Math.min(order.size(), position + wave));
-                for (ColdSegmentCodec.Rows rows : decodeBatch(connection, batch, rowFilter)) {
-                for (int row = 0; row < rows.size(); row++) {
-                    long rowId = rows.getRowId(row);
-                    Object[] values = rows.getValues(row);
-                    Integer overlayFlag = layout.rolledBackColumn >= 0 ? overlay.get(rowId) : null;
-
-                    statement.setLong(1, rowId);
-                    for (int column = 0; column < layout.columns.length; column++) {
-                        Object value = column == layout.rolledBackColumn && overlayFlag != null ? Long.valueOf(overlayFlag.longValue()) : values[column];
-                        if (value == null) {
-                            statement.setNull(column + 2, java.sql.Types.NULL);
-                        }
-                        else if (value instanceof byte[]) {
-                            statement.setBytes(column + 2, (byte[]) value);
-                        }
-                        else if (value instanceof String) {
-                            statement.setString(column + 2, (String) value);
-                        }
-                        else if (value instanceof Double) {
-                            statement.setDouble(column + 2, (Double) value);
-                        }
-                        else {
-                            statement.setLong(column + 2, ((Number) value).longValue());
-                        }
-                    }
-                    statement.addBatch();
-                    inserted++;
-                    if (inserted % 2000 == 0) {
-                        statement.executeBatch();
-                    }
-
-                    // The limit is enforced on rows actually written, not only on what the read
-                    // was expected to need, so a read can never grow beyond it whatever happens.
-                    if (inserted > maximumRows) {
-                        context.outOfReach = true;
-                        debug("read " + table + ": stopped after " + inserted + " rows, more than the " + maximumRows + " allowed");
-                        break;
-                    }
-                }
-                }
-            }
-            statement.executeBatch();
+            completed = true;
         }
         finally {
-            if (autoCommit) {
-                if (inserted > 0) {
-                    // SQLite only opens a transaction once something is written, so committing
-                    // when nothing was inserted is an error rather than a no-op.
-                    connection.commit();
-                }
-                connection.setAutoCommit(true);
-            }
+            endScratch(connection, completed);
         }
 
         if (context != null && context.outOfReach) {
@@ -1494,6 +1492,51 @@ public final class SQLiteColdIndex {
         }
         catch (SQLException exception) {
             // A temporary table that cannot be dropped disappears when the connection is returned.
+        }
+    }
+
+    /**
+     * Opens the savepoint a read builds its scratch table under.
+     *
+     * @param connection
+     *            the connection the lookup runs on
+     * @throws SQLException
+     *             if the savepoint cannot be opened
+     */
+    private static void beginScratch(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("SAVEPOINT " + SCRATCH_SAVEPOINT);
+        }
+    }
+
+    /**
+     * Closes the savepoint a read built its scratch table under: kept when the read finished,
+     * taken back when it did not. Either way the caller is left with whatever transaction it had
+     * before, untouched.
+     *
+     * @param connection
+     *            the connection the lookup runs on
+     * @param succeeded
+     *            whether the scratch table was built
+     * @throws SQLException
+     *             if a finished read cannot release its savepoint
+     */
+    private static void endScratch(Connection connection, boolean succeeded) throws SQLException {
+        if (succeeded) {
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate("RELEASE SAVEPOINT " + SCRATCH_SAVEPOINT);
+            }
+            return;
+        }
+
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("ROLLBACK TO SAVEPOINT " + SCRATCH_SAVEPOINT);
+            statement.executeUpdate("RELEASE SAVEPOINT " + SCRATCH_SAVEPOINT);
+        }
+        catch (SQLException exception) {
+            // A full disk or a failed write takes the whole transaction back on its own, and there
+            // is no savepoint left to unwind afterwards. Neither statement is allowed to stand in
+            // front of the failure that brought us here.
         }
     }
 
@@ -1907,6 +1950,9 @@ public final class SQLiteColdIndex {
 
     /** Segments decoded at once. Bounds how much decoded data is held before it is inserted. */
     private static final int DECODE_WAVE = 8;
+
+    /** The savepoint a read builds its scratch table under. */
+    private static final String SCRATCH_SAVEPOINT = "cp_cold_read";
 
     /**
      * Above this many rows a read decodes one segment at a time. Decoding several at once is
