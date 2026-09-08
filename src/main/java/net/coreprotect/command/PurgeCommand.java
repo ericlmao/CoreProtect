@@ -27,6 +27,7 @@ import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
 import net.coreprotect.model.action.LookupActions;
 import net.coreprotect.patch.Patch;
+import net.coreprotect.services.AutoPurgeService;
 import net.coreprotect.utility.Chat;
 import net.coreprotect.utility.ChatMessage;
 import net.coreprotect.utility.Color;
@@ -35,7 +36,6 @@ import net.coreprotect.utility.EntitySpawnTracking;
 import net.coreprotect.utility.MaterialUtils;
 import net.coreprotect.utility.VersionUtils;
 import net.coreprotect.utility.ErrorReporter;
-import net.coreprotect.utility.extensions.BackgroundService;
 
 public class PurgeCommand extends Consumer {
 
@@ -92,7 +92,7 @@ public class PurgeCommand extends Consumer {
             return result;
         }
 
-        BackgroundService.requestCancel();
+        AutoPurgeService.requestCancel();
         for (int attempt = 0; attempt < 60; attempt++) {
             requirePurgeNotCancelled();
             Thread.sleep(500);

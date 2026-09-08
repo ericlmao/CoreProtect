@@ -46,6 +46,7 @@ public class ShutdownService {
     public static void safeShutdown(Plugin plugin) {
         try {
             Consumer.blockDatabaseReloadForShutdown();
+            AutoPurgeService.stop();
             Extensions.stopBackgroundService();
 
             // Log disconnections of online players if server is stopping
