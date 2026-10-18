@@ -229,7 +229,7 @@ public final class AutoPurgeService {
             removed = removed + PurgeExecutor.purgeColdSegments(connection, cutoff, factory, callback);
 
             for (String table : PurgePolicy.getPurgeableTables()) {
-                removed = removed + PurgeExecutor.purgeTable(connection, table, 0, cutoff, 0, null, BATCH_SIZE, factory, callback);
+                removed = removed + PurgeExecutor.purgeTable(connection, table, cutoff, BATCH_SIZE, factory, callback);
             }
 
             removed = removed + PurgeExecutor.removeOrphanedRows(connection, factory, callback);

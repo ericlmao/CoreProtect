@@ -1,6 +1,5 @@
 package net.coreprotect.utility;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Array;
 import java.util.*;
@@ -20,7 +19,6 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.util.io.BukkitObjectInputStream;
 import org.bukkit.util.io.BukkitObjectOutputStream;
 
 import net.coreprotect.bukkit.BukkitAdapter;
@@ -28,6 +26,7 @@ import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.model.BlockGroup;
 import net.coreprotect.utility.serialize.BlobCompression;
+import net.coreprotect.utility.serialize.BlockMetaCodec;
 import net.coreprotect.utility.serialize.ItemDataCodec;
 import net.coreprotect.utility.serialize.ItemMetaHandler;
 
@@ -506,9 +505,7 @@ public class ItemUtils {
             return ItemDataCodec.decode(payload);
         }
 
-        try (ByteArrayInputStream byteStream = new ByteArrayInputStream(payload); BukkitObjectInputStream objectStream = new BukkitObjectInputStream(byteStream)) {
-            return objectStream.readObject();
-        }
+        return BlockMetaCodec.decodeLegacy(payload);
     }
 
     private static byte[] serializeByteData(Object data) throws Exception {
@@ -730,7 +727,8 @@ public class ItemUtils {
         var item = getItemStack(metadata, type, amount);
         if (item == null) return "";
 
-        String displayName = item.hasItemMeta() && item.getItemMeta().hasDisplayName() ? item.getItemMeta().getDisplayName() : "";
+        ItemMeta itemMeta = item.hasItemMeta() ? item.getItemMeta() : null;
+        String displayName = itemMeta == null ? "" : getItemDisplayName(itemMeta);
         StringBuilder message = new StringBuilder(Color.ITALIC + displayName + Color.GREY);
 
         List<String> enchantments = ItemMetaHandler.getEnchantments(item, displayName);
@@ -750,6 +748,14 @@ public class ItemUtils {
         }
 
         return message.toString();
+    }
+
+    private static String getItemDisplayName(ItemMeta itemMeta) {
+        if (itemMeta.hasDisplayName()) {
+            return itemMeta.getDisplayName();
+        }
+
+        return BukkitAdapter.ADAPTER.getItemName(itemMeta);
     }
 
     public static Map<Integer, Object> serializeItemStackLegacy(ItemStack itemStack, String faceData, int slot) {

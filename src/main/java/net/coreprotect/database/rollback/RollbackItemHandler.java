@@ -7,8 +7,6 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 
 import net.coreprotect.config.ConfigHandler;
-import net.coreprotect.utility.ItemUtils;
-import net.coreprotect.utility.ErrorReporter;
 
 public class RollbackItemHandler {
 
@@ -22,18 +20,7 @@ public class RollbackItemHandler {
      * @return Object array containing [slot, facing, itemstack]
      */
     public static Object[] populateItemStack(ItemStack itemstack, byte[] metadata) {
-        if (metadata != null) {
-            try {
-                Object metaList = ItemUtils.deserializeByteData(metadata);
-
-                return RollbackUtil.populateItemStack(itemstack, metaList);
-            }
-            catch (Exception e) {
-                ErrorReporter.report(e);
-            }
-        }
-
-        return new Object[] { 0, "", itemstack };
+        return RollbackUtil.populateItemStack(itemstack, metadata);
     }
 
     /**
