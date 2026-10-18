@@ -3,7 +3,9 @@ package net.coreprotect.database;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import net.coreprotect.config.ConfigHandler;
@@ -46,20 +48,22 @@ public final class PurgeExecutor {
     }
 
     /**
-     * Deletes the rows of a single table that fall inside the purged time window.
+     * Deletes the rows of a single table that a purge selects.
+     *
+     * <p>
+     * Entity data has no world or type of its own; it belongs to the kill row that references it.
+     * When a purge removes only some kill rows, the entity data of those kills is deleted before
+     * the kill rows themselves, while the references are still there to follow. On MySQL both
+     * deletes run in one transaction, so a failure part way through never leaves a kept kill row
+     * without the data its rollback needs.
+     * </p>
      *
      * @param connection
      *            an open connection to the database being purged
      * @param table
      *            the unprefixed table name
-     * @param timeStart
-     *            the inclusive lower bound of the purged window, in epoch seconds
-     * @param timeEnd
-     *            the exclusive upper bound of the purged window, in epoch seconds
-     * @param worldId
-     *            the world to restrict the purge to, or 0 for every world
-     * @param blockRestriction
-     *            an optional SQL fragment restricting which rows are purged, ending in "AND"
+     * @param filter
+     *            selects the rows the purge removes
      * @param batchSize
      *            the maximum number of rows deleted per statement
      * @param factory
@@ -70,31 +74,67 @@ public final class PurgeExecutor {
      * @throws Exception
      *             if the purge fails or is cancelled
      */
-    public static long purgeTable(Connection connection, String table, long timeStart, long timeEnd, int worldId, String blockRestriction, int batchSize, StatementFactory factory, BatchCallback callback) throws Exception {
-        if (!PurgePolicy.isPurgeable(table)) {
+    public static long purgeTable(Connection connection, String table, PurgeFilter filter, int batchSize, StatementFactory factory, BatchCallback callback) throws Exception {
+        String condition = filter.deleteCondition(table, ConfigHandler.prefix);
+        if (condition == null) {
             return 0;
         }
-        if (blockRestriction != null && !blockRestriction.isEmpty() && !PurgePolicy.supportsBlockRestriction(table)) {
-            return 0;
+
+        boolean deleteEntities = table.equals("block") && filter.removesKills() && !filter.purgesEntitiesByTime();
+        if (!deleteEntities) {
+            return deleteInBatches(connection, ConfigHandler.prefix + table, condition, batchSize, factory, callback);
         }
 
-        String worldRestriction = "";
-        if (worldId > 0) {
-            if (!PurgePolicy.isWorldScoped(table)) {
-                return 0;
-            }
-            if (table.equals("entity_container") || table.equals("entity_interaction")) {
-                worldRestriction = " AND (wid = '" + worldId + "' OR entity_spawn_rowid IN(SELECT rowid FROM " + ConfigHandler.prefix + "entity_spawn WHERE current_wid = '" + worldId + "'))";
-            }
-            else {
-                worldRestriction = " AND wid = '" + worldId + "'";
-            }
+        boolean atomic = ConfigHandler.databaseType.isMySQL();
+        if (atomic) {
+            connection.setAutoCommit(false);
         }
+        try {
+            callback.beforeBatch();
+            long removed = execute(connection, factory, filter.deleteEntitiesOfPurgedKills(ConfigHandler.databaseType, ConfigHandler.prefix));
+            removed = removed + deleteInBatches(connection, ConfigHandler.prefix + table, condition, batchSize, factory, callback);
+            if (atomic) {
+                connection.commit();
+                connection.setAutoCommit(true);
+            }
+            return removed;
+        }
+        catch (Exception e) {
+            if (atomic) {
+                try {
+                    connection.rollback();
+                    connection.setAutoCommit(true);
+                }
+                catch (SQLException rollbackException) {
+                    e.addSuppressed(rollbackException);
+                }
+            }
+            throw e;
+        }
+    }
 
-        String restriction = blockRestriction == null ? "" : blockRestriction;
-        String condition = restriction + "time < '" + timeEnd + "' AND time >= '" + timeStart + "'" + worldRestriction;
-
-        return deleteInBatches(connection, ConfigHandler.prefix + table, condition, batchSize, factory, callback);
+    /**
+     * Deletes every row of a table older than a cutoff, as the automatic purge does.
+     *
+     * @param connection
+     *            an open connection to the database being purged
+     * @param table
+     *            the unprefixed table name
+     * @param cutoff
+     *            rows older than this timestamp are removed
+     * @param batchSize
+     *            the maximum number of rows deleted per statement
+     * @param factory
+     *            the statement factory to use
+     * @param callback
+     *            invoked before every batch
+     * @return the number of rows deleted
+     * @throws Exception
+     *             if the purge fails or is cancelled
+     */
+    public static long purgeTable(Connection connection, String table, long cutoff, int batchSize, StatementFactory factory, BatchCallback callback) throws Exception {
+        PurgeFilter filter = new PurgeFilter(0, cutoff, 0, null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), false);
+        return purgeTable(connection, table, filter, batchSize, factory, callback);
     }
 
     /**
@@ -115,6 +155,27 @@ public final class PurgeExecutor {
      *             if the purge fails or is cancelled
      */
     public static long purgeColdSegments(Connection connection, long cutoff, StatementFactory factory, BatchCallback callback) throws Exception {
+        return purgeColdSegments(connection, 0, cutoff, factory, callback);
+    }
+
+    /**
+     * Drops whole cold segments that lie entirely inside a purged time window.
+     *
+     * @param connection
+     *            an open connection to the database being purged
+     * @param timeStart
+     *            rows older than this timestamp are kept, or 0 for no lower bound
+     * @param cutoff
+     *            rows older than this timestamp are being removed
+     * @param factory
+     *            the statement factory to use
+     * @param callback
+     *            invoked before the work starts
+     * @return the number of rows the dropped segments held
+     * @throws Exception
+     *             if the purge fails or is cancelled
+     */
+    public static long purgeColdSegments(Connection connection, long timeStart, long cutoff, StatementFactory factory, BatchCallback callback) throws Exception {
         if (!ConfigHandler.databaseType.isSQLite()) {
             return 0;
         }
@@ -123,7 +184,7 @@ public final class PurgeExecutor {
         long removed = 0;
         String prefix = ConfigHandler.prefix;
 
-        try (PreparedStatement statement = factory.prepare(connection, "SELECT id,table_id,start_rowid,end_rowid,row_count FROM " + prefix + "segment WHERE max_time < " + cutoff)) {
+        try (PreparedStatement statement = factory.prepare(connection, "SELECT id,table_id,start_rowid,end_rowid,row_count FROM " + prefix + "segment WHERE max_time < " + cutoff + (timeStart > 0 ? " AND min_time >= " + timeStart : ""))) {
             List<long[]> expired = new ArrayList<>();
             try (ResultSet results = statement.executeQuery()) {
                 while (results.next()) {

@@ -15,6 +15,7 @@ import net.coreprotect.consumer.Consumer;
 import net.coreprotect.language.Language;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.listener.ListenerHandler;
+import net.coreprotect.listener.player.inspector.BaseInspector;
 import net.coreprotect.thread.CacheHandler;
 import net.coreprotect.thread.Scheduler;
 import net.coreprotect.thread.TickTimeMonitor;
@@ -151,8 +152,10 @@ public class PluginInitializationService {
         TickTimeMonitor.initialize(plugin);
 
         // Start cache cleanup thread
-        Thread cacheCleanUpThread = new Thread(new CacheHandler());
-        cacheCleanUpThread.start();
+        CacheHandler.startThread();
+
+        // Start inspector lookup threads
+        BaseInspector.startLookups();
 
         Consumer.startConsumer();
         EntitySpawnTracking.initializeLoadedEntities();

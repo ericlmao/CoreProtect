@@ -1,9 +1,6 @@
 package net.coreprotect.database.statement;
 
-import java.io.ByteArrayInputStream;
 import java.util.List;
-
-import org.bukkit.util.io.BukkitObjectInputStream;
 
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.database.ConsumerWriteBatch;
@@ -57,11 +54,7 @@ public class BlockStatement {
         }
         catch (Exception exception) {
             if (databaseType.isColumnar()) {
-                byte[] legacy = ItemUtils.convertByteData(metadata);
-                if (legacy != null) {
-                    ErrorReporter.report(exception, ConfigHandler.EDITION_BRANCH.contains("-dev"));
-                    return legacy;
-                }
+                throw new IllegalArgumentException("Unable to encode " + databaseType.getDisplayName() + " block metadata", exception);
             }
             ErrorReporter.report(exception, ConfigHandler.EDITION_BRANCH.contains("-dev"));
             return null;
@@ -72,13 +65,8 @@ public class BlockStatement {
         if (metadata == null) {
             return null;
         }
-        if (BlockMetaCodec.isEncoded(metadata)) {
-            if (targetType.isColumnar()) {
-                return BlockMetaCodec.canonicalize(metadata);
-            }
-            return serializeMetadataStrict(BlockMetaCodec.decode(metadata), targetType);
-        }
-        return serializeMetadataStrict(deserializeMetadataStrict(metadata), targetType);
+        byte[] canonical = BlockMetaCodec.isEncoded(metadata) ? BlockMetaCodec.canonicalize(metadata) : BlockMetaCodec.fromLegacy(metadata);
+        return targetType.isColumnar() ? canonical : BlockMetaCodec.toLegacy(canonical);
     }
 
     public static List<Object> deserializeMetadata(byte[] metadata) {
@@ -110,17 +98,6 @@ public class BlockStatement {
 
     private static List<Object> deserializeMetadataStrict(byte[] storedMetadata) throws Exception {
         byte[] metadata = BlobCompression.decompress(storedMetadata);
-        if (BlockMetaCodec.isEncoded(metadata)) {
-            return BlockMetaCodec.decode(metadata);
-        }
-        try (ByteArrayInputStream inputBytes = new ByteArrayInputStream(metadata); BukkitObjectInputStream input = new BukkitObjectInputStream(inputBytes)) {
-            Object value = input.readObject();
-            if (!(value instanceof List<?>)) {
-                throw new IllegalArgumentException("Block metadata root is not a list");
-            }
-            @SuppressWarnings("unchecked")
-            List<Object> values = (List<Object>) value;
-            return values;
-        }
+        return BlockMetaCodec.isEncoded(metadata) ? BlockMetaCodec.decode(metadata) : BlockMetaCodec.decodeLegacy(metadata);
     }
 }
