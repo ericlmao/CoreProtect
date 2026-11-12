@@ -486,8 +486,9 @@ public class ItemUtils {
     }
 
     /**
-     * Reads an item or container payload back into the object tree it was written from, accepting
-     * either the compact binary encoding or the portable Java encoding, compressed or not.
+     * Reads an item, container or block metadata payload back into the object tree it was written
+     * from, accepting the compact item encoding, the compact block encoding or the portable Java
+     * encoding, compressed or not.
      *
      * @param data
      *            the stored payload, may be null
@@ -503,6 +504,11 @@ public class ItemUtils {
         byte[] payload = BlobCompression.decompress(data);
         if (ItemDataCodec.isEncoded(payload)) {
             return ItemDataCodec.decode(payload);
+        }
+        if (BlockMetaCodec.isEncoded(payload)) {
+            // Inventory lookups merge block placements in, and those rows carry the block table's
+            // metadata (such as a placed shulker box's contents) in the block encoding.
+            return BlockMetaCodec.decode(payload);
         }
 
         return BlockMetaCodec.decodeLegacy(payload);
