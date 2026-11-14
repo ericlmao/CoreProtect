@@ -71,16 +71,9 @@ public class SignMessageLookup {
                 results = statement.executeQuery(query);
             }
             else {
-                // Compressed storage as well as the live rows.
+                // Compressed storage as well as the live rows, reading only the page's own rows.
                 source = InspectorSource.open(statement.getConnection(), "sign", worldId, x, x, z, z, 0);
-                query = "SELECT COUNT(*) as count from " + source.table() + " " + source.index() + "WHERE " + where + " LIMIT 1 OFFSET 0";
-                results = statement.executeQuery(query);
-                while (results.next()) {
-                    count = results.getInt("count");
-                }
-                results.close();
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",face,line_1,line_2,line_3,line_4,line_5,line_6,line_7,line_8 FROM " + source.table() + " " + source.index() + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + pageStart;
-                results = statement.executeQuery(query);
+                results = source.page("time," + ConfigHandler.databaseType.getUserColumn() + ",face,line_1,line_2,line_3,line_4,line_5,line_6,line_7,line_8", where, ConfigHandler.getDescendingEventOrder(), pageStart, limit);
             }
 
             while (results.next()) {
@@ -171,6 +164,9 @@ public class SignMessageLookup {
                 PluginChannelListener.getInstance().sendMessageData(commandSender, resultTime, resultUser, message.toString(), true, x, y, z, worldId);
             }
             results.close();
+            if (source != null) {
+                count = (int) source.count(where);
+            }
             int totalPages = (int) Math.ceil(count / (limit + 0.0));
 
             if (found) {

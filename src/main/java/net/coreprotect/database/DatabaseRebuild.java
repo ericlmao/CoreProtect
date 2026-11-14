@@ -329,6 +329,8 @@ public final class DatabaseRebuild {
             statement.executeUpdate("PRAGMA busy_timeout=30000");
             statement.executeUpdate("PRAGMA temp_store=FILE");
         }
+        // A rebuild sorts every index it recreates, which can spill a large sort to disk.
+        SQLiteSchema.useTemporaryDirectory(connection);
         return connection;
     }
 }

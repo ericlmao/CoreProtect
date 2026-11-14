@@ -26,6 +26,7 @@ public final class ColdStorageStats {
     private final long coldRows;
     private final long blobBytes;
     private final long blobSavedBytes;
+    private long liveRows;
 
     private ColdStorageStats(long hotBytes, long coldBytes, long freeBytes, long coldRows, long blobBytes, long blobSavedBytes) {
         this.hotBytes = hotBytes;
@@ -60,6 +61,13 @@ public final class ColdStorageStats {
     /**
      * @return the number of rows stored in compressed segments
      */
+    /**
+     * @return every activity row stored, wherever it currently sits
+     */
+    public long getStoredRows() {
+        return coldRows + liveRows;
+    }
+
     public long getColdRows() {
         return coldRows;
     }
@@ -106,10 +114,23 @@ public final class ColdStorageStats {
 
             long coldBytes = 0;
             long coldRows = 0;
-            try (ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(scalars) + LENGTH(COALESCE(payload, x''))),0), COALESCE(SUM(row_count),0) FROM " + ConfigHandler.prefix + "segment")) {
+            // Segments compaction is still writing hold rows that are also still in the segments
+            // they are being merged from, and are not counted until they take their place.
+            String visible = SQLiteColdIndex.visibleSegments(statement.getConnection());
+            try (ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(scalars) + LENGTH(COALESCE(payload, x''))),0), COALESCE(SUM(row_count),0) FROM " + ConfigHandler.prefix
+                    + "segment WHERE " + visible)) {
                 if (results.next()) {
                     coldBytes = results.getLong(1);
                     coldRows = results.getLong(2);
+                }
+            }
+            // Segments written since their units were stored apart keep only a directory in the
+            // segment row; the bulk of what they hold is in the unit rows.
+            // A compacted segment keeps each unit's share of its payload in the unit's row as well.
+            try (ResultSet results = statement.executeQuery("SELECT COALESCE(SUM(LENGTH(body) + LENGTH(COALESCE(payload, x''))),0) FROM " + ConfigHandler.prefix + "segment_unit WHERE segment_id IN (SELECT id FROM "
+                    + ConfigHandler.prefix + "segment WHERE " + visible + ")")) {
+                if (results.next()) {
+                    coldBytes = coldBytes + results.getLong(1);
                 }
             }
 
@@ -127,7 +148,20 @@ public final class ColdStorageStats {
             long totalBytes = pageCount * pageSize;
             long freeBytes = freeList * pageSize;
             long hotBytes = Math.max(0, totalBytes - coldBytes - freeBytes);
-            return new ColdStorageStats(hotBytes, coldBytes, freeBytes, coldRows, blobBytes, BlobRecompressTask.savedBytes(connection));
+            ColdStorageStats stats = new ColdStorageStats(hotBytes, coldBytes, freeBytes, coldRows, blobBytes, BlobRecompressTask.savedBytes(connection));
+            // Rows only wait in the live tables until there are enough to pack, so counting them
+            // stays cheap.
+            for (String table : SQLiteColdIndex.getSegmentedTables()) {
+                try (ResultSet results = statement.executeQuery("SELECT COUNT(*) FROM " + ConfigHandler.prefix + table)) {
+                    if (results.next()) {
+                        stats.liveRows = stats.liveRows + results.getLong(1);
+                    }
+                }
+                catch (SQLException missing) {
+                    // A table this database does not have holds no rows.
+                }
+            }
+            return stats;
         }
     }
 

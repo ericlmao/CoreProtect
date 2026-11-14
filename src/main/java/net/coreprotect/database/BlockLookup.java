@@ -8,6 +8,7 @@ import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 
 import net.coreprotect.config.ConfigHandler;
+import net.coreprotect.database.lookup.InspectorSource;
 import net.coreprotect.database.statement.UserStatement;
 import net.coreprotect.thread.CacheHandler;
 import net.coreprotect.utility.MaterialUtils;
@@ -18,7 +19,7 @@ public class BlockLookup {
 
     public static String whoPlaced(Statement statement, BlockState block) {
         String result = "";
-        boolean coldRows = false;
+        InspectorSource source = null;
 
         try {
             if (block == null) {
@@ -30,21 +31,19 @@ public class BlockLookup {
             int z = block.getZ();
             int time = (int) (System.currentTimeMillis() / 1000L);
             int worldId = WorldUtils.getWorldId(block.getWorld().getName());
-            String table;
-            String index;
+            String where = "wid = " + worldId + " AND x = " + x + " AND z = " + z + " AND y = " + y + " AND rolled_back IN(0,2) AND action=1";
+            ResultSet results;
             if (ConfigHandler.databaseType.isSQLite()) {
-                SQLiteColdIndex.beginLookup(0, 0);
-                coldRows = true;
-                table = SQLiteColdIndex.sourceExpression(statement.getConnection(), "block", worldId, new Integer[] { 0, x, x, 0, 0, z, z });
-                index = table.startsWith("(") ? "" : WorldUtils.getWidIndex("block");
+                // A busy block can hold far more packed rows than one lookup may copy out, and only
+                // the newest placement is wanted, so only that row is read.
+                source = InspectorSource.open(statement.getConnection(), "block", worldId, x, x, z, z, 0);
+                results = source.page(ConfigHandler.databaseType.getUserColumn() + ",type", where, ConfigHandler.getDescendingEventOrder(), 0, 1);
             }
             else {
-                table = DuckDBLookupQuery.spatialTable(statement.getConnection(), "block", worldId, x, x, z, z, "spatial_rows");
-                index = ConfigHandler.databaseType.isDuckDB() ? "" : WorldUtils.getWidIndex("block");
+                String table = DuckDBLookupQuery.spatialTable(statement.getConnection(), "block", worldId, x, x, z, z, "spatial_rows");
+                String index = ConfigHandler.databaseType.isDuckDB() ? "" : WorldUtils.getWidIndex("block");
+                results = statement.executeQuery("SELECT " + ConfigHandler.databaseType.getUserColumn() + ",type FROM " + table + " " + index + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT 1 OFFSET 0");
             }
-            String query = "SELECT " + ConfigHandler.databaseType.getUserColumn() + ",type FROM " + table + " " + index + "WHERE wid = " + worldId + " AND x = " + x + " AND z = " + z + " AND y = " + y + " AND rolled_back IN(0,2) AND action=1 ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT 1 OFFSET 0";
-
-            ResultSet results = statement.executeQuery(query);
             while (results.next()) {
                 int resultUserId = results.getInt("user");
                 int resultType = results.getInt("type");
@@ -61,13 +60,8 @@ public class BlockLookup {
             ErrorReporter.report(e);
         }
         finally {
-            if (coldRows) {
-                try {
-                    SQLiteColdIndex.endLookup(statement.getConnection());
-                }
-                catch (Exception e) {
-                    ErrorReporter.report(e);
-                }
+            if (source != null) {
+                source.close();
             }
         }
 

@@ -165,6 +165,44 @@ class ColdReadBenchmark {
             finally {
                 SQLiteColdIndex.endLookup(connection);
             }
+
+            // Pages the way the lookup command builds them: the reader is told the whole predicate
+            // and the order the page is shown in, and the page's query runs over what it kept.
+            timePage(connection, "deep_user_page", " user IN(7)", 0, null, 20000, 10, "rowid DESC");
+            timePage(connection, "deep_user_page_by_time", " user IN(7)", 0, null, 20000, 10, "time DESC, id DESC");
+            timePage(connection, "deep_page_every_row", " 1", 0, null, 99990, 10, "rowid DESC");
+            timePage(connection, "height_bounded_page", " wid=1 AND x >= -500 AND x <= 500 AND z >= -500 AND z <= 500 AND y >= 60 AND y <= 70", 1,
+                    new Integer[] { 500, -500, 500, 60, 70, -500, 500 }, 990, 10, "rowid DESC");
+        }
+    }
+
+    private static void timePage(Connection connection, String label, String where, int worldId, Integer[] bounds, long offset, int pageSize, String order) throws SQLException {
+        SQLiteColdIndex.beginLookup(0, 0);
+        try {
+            long began = System.nanoTime();
+            SQLiteColdIndex.setRowBudget(offset + pageSize);
+            SQLiteColdIndex.setPageOrder(order);
+            SQLiteColdIndex.setPredicateFilters(where, "user");
+            String source = SQLiteColdIndex.sourceExpression(connection, "block", worldId, bounds);
+            long kept = 0;
+            if (source.startsWith("(")) {
+                try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery("SELECT COUNT(*) FROM temp.cp_cold_block")) {
+                    results.next();
+                    kept = results.getLong(1);
+                }
+            }
+            String sqlOrder = order.replace(", id DESC", ", rowid DESC");
+            long rows = 0;
+            try (Statement statement = connection.createStatement();
+                    ResultSet results = statement.executeQuery("SELECT rowid FROM " + source + " WHERE" + where + " ORDER BY " + sqlOrder + " LIMIT " + pageSize + " OFFSET " + offset)) {
+                while (results.next()) {
+                    rows++;
+                }
+            }
+            System.out.println(label + "_ms=" + (System.nanoTime() - began) / 1_000_000 + " rows=" + rows + " kept=" + kept + " truncated=" + SQLiteColdIndex.wasTruncated());
+        }
+        finally {
+            SQLiteColdIndex.endLookup(connection);
         }
     }
 

@@ -1,7 +1,6 @@
 package net.coreprotect.database.statement;
 
 import java.sql.ResultSet;
-import java.sql.Statement;
 
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
@@ -27,14 +26,22 @@ public class SignStatement {
         }
     }
 
-    public static void getData(Statement statement, BlockState block, String query) {
+    /**
+     * Puts a logged sign's colors, glow, text and wax back on the sign, from the rows given.
+     *
+     * @param resultSet
+     *            the logged state to restore, which is closed once read
+     * @param block
+     *            the sign
+     */
+    public static void getData(ResultSet resultSet, BlockState block) {
         try {
             if (!(block instanceof Sign)) {
+                resultSet.close();
                 return;
             }
 
             Sign sign = (Sign) block;
-            ResultSet resultSet = statement.executeQuery(query);
 
             while (resultSet.next()) {
                 int color = resultSet.getInt("color");

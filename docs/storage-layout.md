@@ -1,51 +1,66 @@
 # Storage Layout
 
-SQLite installations use a two tier storage layout designed to hold as much history as possible in as little disk space as possible.
+SQLite installations store activity in a layout designed to hold as much history as possible in as little disk space as possible, while every lookup stays fast.
 
 ## How it works
 
-**Recent activity** stays in the ordinary tables, fully indexed. Lookups, rollbacks and the inspector work exactly as they always have, at the same speed.
+Activity is written to the ordinary tables first, and packed into compressed segments as soon as there is enough of it: a segment is written the moment a day has logged 65,536 rows of one kind, and whatever a day logged beyond its last full segment is packed a few minutes after the day ends. The ordinary tables are only where rows wait until then. There is no window of recent history kept apart and nothing to configure: every lookup, rollback, restore and inspector click reads the waiting rows and the packed ones together, in one result, and nothing about the answer depends on where a row happens to be.
 
-**Older activity** is packed into compressed segments once per day. A segment holds up to 65,536 consecutive rows from a single day, stored column by column instead of row by row: timestamps and row ids become small differences from the previous row, the interned world, user, type and action numbers pack into one or two bytes each, and the item and block payloads are compressed together with a dictionary trained on that server's own data. Segments carry no indexes, and a segment records the range of times, worlds and chunks it covers so a lookup can skip the ones that cannot match.
+A segment stores its rows column by column instead of row by row. Timestamps and row ids become small differences from the previous row, the interned world, user, type and action numbers pack into one or two bytes each, and the item and block payloads are compressed together with a dictionary trained on that server's own data. Segments carry no indexes. Instead:
 
-Measured on a database of 540,000 events with realistic item metadata, the whole file went from **77.9 MB to 6.9 MB — 11.3x smaller**. Most of that comes from what disappears: per-row storage overhead and the indexes, which on a history heavy database outweigh the event data itself.
+* each segment records the range of times, worlds, players and block types it covers, and exactly how many of its rows lie in each chunk, so a lookup skips every segment that cannot match, and a lookup covering whole chunks is counted without reading any rows;
+* inside a segment, rows are ordered by where they happened and divided into groups of 1,024 rows, each recording the range of every column it holds and the chunks its rows lie in, so a lookup about one place decodes only the groups holding rows there rather than the whole segment. Groups are compressed eight at a time into units, and each unit is stored as a row of its own beside the segment, so such a lookup also reads only the units holding those groups from the database, a small part of the segment, rather than all of it;
+* recently read segments are kept in memory (`lookup-cache-mb`), so repeated clicks, paging and a rollback after its preview do not read them again.
 
-The trade is search speed on old data. A lookup that reaches into compressed storage decodes the segments it cannot rule out, which takes seconds rather than milliseconds. Lookups that only cover the hot window never touch compressed storage at all.
+Chat, commands and sessions are looked up by player rather than by place, and are ordered by player instead.
+
+Measured on segments taken from a production server, the current format stores its busiest table, container transactions, in half the space the previous format did, and a lookup about one place reads a segment three to nine times faster. Keeping the waiting area small also keeps writes cheap: the indexes on the ordinary tables only ever cover the rows that have not been packed yet, where on the same server a single day of unpacked container rows had grown indexes larger than the rows themselves.
 
 ## Configuration
 
 ```yaml
-hot-window: 7d
 blob-compression: true
 blob-compression-level: 19
-hot-blob-compression-level: 3
+log-blob-compression-level: 3
+lookup-cache-mb: 128
 ```
 
-`hot-window` decides how much history stays in the fast tables. A longer window keeps more data instantly searchable and uses more disk; a shorter one compresses sooner. Values use the usual CoreProtect time style, such as `3d`, `7d` or `30d`.
+`blob-compression-level` is used when activity is packed into segments, and `log-blob-compression-level` for item and block data as it is logged. The low level for fresh data keeps logging cheap, since it is packed properly soon after anyway. `lookup-cache-mb` is the memory kept for recently read segments.
 
-`blob-compression-level` is used when data is packed into segments, and `hot-blob-compression-level` when it is first logged. The low level for fresh data keeps logging cheap, since that data is recompressed properly within days anyway.
+Earlier builds had a `hot-window` setting that kept a number of days unpacked. It no longer exists and is ignored if present.
 
 ## What still works unchanged
 
-* Lookups, rollbacks, restores and the inspector read compressed and live data together, in one result.
+* Lookups, rollbacks, restores, the inspector and the API read packed and waiting activity together, in one result.
 * Row ids are preserved, so paging through a long lookup behaves as before.
-* Rolling back data that has already been compressed is supported. The rollback state is recorded alongside the segment; segments themselves are never rewritten.
-* `/co purge` and automatic purging remove compressed data by dropping whole segments, which is far cheaper than deleting rows. Because segments never span a day, retention lands exactly on day boundaries.
+* Rolling back data that has already been packed is supported. The rollback state is recorded alongside the segment; the segment's rows are never changed.
+* `/co purge` and automatic purging remove packed data by dropping whole segments, which is far cheaper than deleting rows. Because segments never span a day, retention lands exactly on day boundaries.
 
-## Compacting on demand
+## Packing on demand
 
-Compression normally happens during the nightly automatic purge. To pack older data immediately — after lowering `hot-window`, or just to see the effect — run:
+Packing runs on its own in the background, a segment at a time, and gives way to purges, rollbacks and shutdown. To pack everything logged so far immediately, including the part that has not filled a segment yet, run:
 
 ```text
 /co compact
 ```
 
-Unlike the nightly run, `/co compact` ignores `hot-window` entirely and packs everything logged up to that moment, including data from today. It reports how many rows were packed and returns the freed pages to the file system afterwards. Newly logged data goes back into the live tables as usual, so the hot window still governs everything written after the compact.
+It reports how many rows were packed and returns the freed pages to the file system afterwards.
+
+## Compacting days that are over
+
+A busy table writes a segment every few minutes, hundreds a day, each ordered by place only within itself, so the activity at one chest over one day is spread across every segment written while anyone used it. Once a day is over nothing more is written to it, and its segments are merged into a few of about 262,144 rows each, ordered by place across the whole day. The rows of one place over one day then lie together in one segment, and a lookup about a place opens about one segment for each day the place saw activity instead of one for every few minutes. On a month of busy container activity that took an inspector click from about 8,900 segments and 150 MB read to about 30 segments and 3.4 MB.
+
+Compaction runs in the background whenever there is nothing to pack or rewrite, one day at a time, and all at once in `/co compact` and the nightly maintenance run. Only segments that follow one another, with nothing else of the table in between, are merged, so a row packed late on its own is never merged across. The merged segments are written aside and then take the place of the ones they were made from in one short transaction, while no lookup is running, so a lookup sees one or the other and never both or neither; a compaction that is interrupted leaves the original segments as they were. Row ids, values and rollback state do not change. A compacted segment keeps each unit's share of the item and block data beside the unit, so a lookup reads the share holding the rows it keeps rather than the data of the whole segment.
+
+Because a compacted segment spans its whole day, a purge drops a compacted day once the cutoff has passed the end of it.
+
+## Upgrading segments written by earlier builds
+
+Segments written before rows were grouped, before groups listed their chunks, or before units were stored apart from the rest of the segment, are still read. They are rewritten in the current format in the background, a few at a time whenever there is nothing else to pack, and all at once by `/co compact` and the nightly maintenance run. A segment that only needs its units moved out is split as it is, without being decoded or compressed again. Each segment is rewritten in its own short transaction and checked before it is written; its rows, their ids and their rollback state do not change, and lookups read it the same way before, during and after.
 
 ## Entity data
 
-Most tables are packed into segments once they age out of the hot window. Entity data is the
-exception. A lookup fetches it a row at a time by row id, from anywhere in the table, so it has to
+Most tables are packed into segments as they are logged. Entity data is the exception. A lookup fetches it a row at a time by row id, from anywhere in the table, so it has to
 stay somewhere a single row can be read on its own — unpacking a segment of tens of thousands of
 rows to display one entity would be far worse than the space it saves.
 
@@ -78,27 +93,23 @@ if interrupted. Groups whose rows have all been removed by retention are dropped
 
 ### Where this shows up in `/co status`
 
-Packed entity data counts towards **Cold Data** along with the segments, because it is compressed
-storage too even though it is not a segment. `/co status` breaks it out so it is clear where the
-compressed total comes from, and reports what packing it saved:
+`/co status` reports storage as one figure, since where a row currently sits makes no difference to
+anyone, and breaks packed entity data out so it is clear what packing it saved:
 
 ```text
-Hot Data: 1.40 GB (recent activity, fully indexed).
-Cold Data: 892.0 MB (132,294,578 rows compressed).
+Storage: 2.29 GB holding 132,294,578 rows of activity.
 Entity Data: 680.0 MB packed, saving 51.0 GB.
 ```
 
-The row count beside Cold Data counts rows held in segments. Packed entity blobs belong to rows that
-are still in the live tables, so they add to the compressed size without adding to that count.
-
 ## The inspector
 
-`/co i` reads compressed storage as well as the live tables, so clicking a block shows its whole
-history rather than only what happened to it inside the hot window.
+`/co i` reads packed storage as well as the rows still waiting to be packed, so clicking a block shows
+its whole history.
 
 That is affordable because the coordinates narrow it down: only the segments whose chunks could hold
-the block are opened, and only the rows in them at those coordinates are handed to the query. A click
-costs about what a small lookup costs.
+the block are opened, inside them only the groups of rows around the block are decoded, and only the
+rows at those coordinates are handed to the query. A click costs well under a millisecond per segment
+it has to open.
 
 Two of its views are keyed by an entity rather than by a place — the contents of an entity's
 inventory, and interactions with an entity. They have no coordinates to go on, so each segment also
@@ -109,7 +120,7 @@ could hold something of it. Segments written before that was recorded gain it on
 ## Limits
 
 * This layout is SQLite only. DuckDB and ClickHouse compress their own storage; MySQL is unchanged.
-* A purge limited to one world or to specific block types only covers data still in the live tables, since removing part of a segment would mean rewriting it.
+* A purge limited to one world or to specific block types only covers rows that have not been packed yet, since removing part of a segment would mean rewriting it. With activity packed minutes after it is logged, such a purge removes very little; purge by time instead.
 * Entity data is never packed into a segment. It is read one row at a time by row id, so it stays in the live tables where a single row can be fetched without unpacking anything else; it is compressed where it lies instead, as described above.
 
 ## Upgrading an existing database

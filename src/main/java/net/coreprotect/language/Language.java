@@ -57,7 +57,7 @@ public class Language {
         phrases.put(Phrase.COMPACT_NOTHING_TO_DO, "There was nothing left to compact.");
         phrases.put(Phrase.COMPACT_PROGRESS, "Compacting: {0}.");
         phrases.put(Phrase.COMPACT_REBUILD_PENDING, "The file is mostly free space ({0}). It is written out afresh when the server stops, which takes minutes rather than days.");
-        phrases.put(Phrase.COMPACT_STARTED, "Compacting older data into compressed storage. The server remains usable.");
+        phrases.put(Phrase.COMPACT_STARTED, "Packing everything logged so far into compressed storage. The server remains usable.");
         phrases.put(Phrase.COMPACT_STOPPED, "Compacting stopped early. The remaining data is packed on the next run.");
         phrases.put(Phrase.COMPACT_UNSUPPORTED, "Compressed storage is only used by SQLite. This server uses {0}.");
         phrases.put(Phrase.COMMAND_CONSOLE, "Please run the command from the console.");
@@ -189,7 +189,6 @@ public class Language {
         phrases.put(Phrase.LOGGING_ITEMS, "{0} items left to log. Please wait...");
         phrases.put(Phrase.LOGGING_TIME_LIMIT, "Logging time limit reached. Discarding data and shutting down.");
         phrases.put(Phrase.LOOKUP_FAILED, "The lookup could not be completed. Check the server log for details.");
-        phrases.put(Phrase.LOOKUP_PAGE_OUT_OF_REACH, "That page is too far back to display. Narrow the search with t: or r:, or raise \"cold-max-rows\".");
         phrases.put(Phrase.LOOKUP_COLD_READ_FAILED, "Compressed history could not be read, so only recent rows are shown. Check the server log for details.");
         phrases.put(Phrase.LOOKUP_BLOCK, "{0} {placed|broke} {1}.");
         phrases.put(Phrase.LOOKUP_CONTAINER, "{0} {added|removed} {1} {2}.");
@@ -274,12 +273,11 @@ public class Language {
         phrases.put(Phrase.ROLLBACK_WORLD_ACTION, "Restricted to {world|action} \"{0}\".");
         phrases.put(Phrase.SIGN_HEADER, "Sign Messages");
         phrases.put(Phrase.STATUS_AUTO_PURGE, "Cleanup: {0} {row|rows} auto purged since restart.");
-        phrases.put(Phrase.STATUS_COLD_DATA, "Cold Data: {0} ({1} {row|rows} compressed).");
         phrases.put(Phrase.STATUS_CONSUMER, "Consumer: {0} {item|items} in queue.");
         phrases.put(Phrase.STATUS_DATABASE, "Database: Using {0}.");
         phrases.put(Phrase.STATUS_DATABASE_STATE, "({writes halted|unreachable})");
         phrases.put(Phrase.STATUS_ENTITY_DATA, "Entity Data: {0} packed, saving {1}.");
-        phrases.put(Phrase.STATUS_HOT_DATA, "Hot Data: {0} (recent activity, fully indexed).");
+        phrases.put(Phrase.STATUS_STORAGE, "Storage: {0} holding {1} {row|rows} of activity.");
         phrases.put(Phrase.STATUS_INTEGRATION, "{0}: Integration {enabled|disabled}.");
         phrases.put(Phrase.STATUS_LICENSE, "License: {0}");
         phrases.put(Phrase.STATUS_SYSTEM, "System: {0}");

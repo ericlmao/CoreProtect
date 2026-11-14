@@ -1,7 +1,6 @@
 package net.coreprotect.api;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
@@ -42,29 +41,17 @@ public class ItemAPI {
                 return result;
             }
 
-            StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,type,data,amount,action,rolled_back FROM ");
-            query.append(filter.table(connection, "item", "")).append(' ');
-            if (filter.hasLocation() && !ConfigHandler.databaseType.isDuckDB()) {
-                query.append(WorldUtils.getWidIndex("item"));
+            try {
+                String where = filter.where("") + " AND action NOT IN (" + ItemLogger.ITEM_BREAK + "," + ItemLogger.ITEM_DESTROY + "," + ItemLogger.ITEM_CREATE + "," + ItemLogger.ITEM_SELL + "," + ItemLogger.ITEM_BUY + ")";
+                StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,type,data,amount,action,rolled_back FROM ");
+                query.append(filter.table(connection, "item", "", where, 0)).append(' ');
+                query.append(filter.index("item"));
+                query.append("WHERE ").append(where);
+
+                filter.read(connection, query.toString(), " ORDER BY " + ConfigHandler.getDescendingEventOrder(), filter::bind, results -> result.add(parseItemResult(connection, results)));
             }
-            filter.appendWhere(query);
-            query.append(" AND action NOT IN (")
-                    .append(ItemLogger.ITEM_BREAK).append(",")
-                    .append(ItemLogger.ITEM_DESTROY).append(",")
-                    .append(ItemLogger.ITEM_CREATE).append(",")
-                    .append(ItemLogger.ITEM_SELL).append(",")
-                    .append(ItemLogger.ITEM_BUY).append(")");
-            query.append(" ORDER BY ").append(ConfigHandler.getDescendingEventOrder());
-            filter.appendLimit(query);
-
-            try (PreparedStatement statement = connection.prepareStatement(query.toString())) {
-                filter.bind(statement);
-
-                try (ResultSet results = statement.executeQuery()) {
-                    while (results.next()) {
-                        result.add(parseItemResult(connection, results));
-                    }
-                }
+            finally {
+                filter.close();
             }
         }
         catch (Exception e) {

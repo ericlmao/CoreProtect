@@ -85,9 +85,8 @@ class InspectorSourceTest {
         assertEquals(1, countLive(), "only the newest row is left in the live table");
 
         try (InspectorSource source = InspectorSource.open(connection, "block", WORLD, X, X, Z, Z, 0)) {
-            assertTrue(source.table().startsWith("("), "the source reads from the live rows and the segments together");
-            assertTrue(source.index().isEmpty(), "an index on the live table cannot be hinted for an expression");
             assertEquals(600, countThrough(source), "the packed rows are found");
+            assertEquals(7, pageThrough(source, 0, 7), "and a page of them is read");
         }
     }
 
@@ -97,9 +96,7 @@ class InspectorSourceTest {
         seal();
 
         try (InspectorSource source = InspectorSource.open(connection, "block", WORLD, X, X, Z, Z, 0)) {
-            try (Statement statement = connection.createStatement();
-                    ResultSet results = statement.executeQuery("SELECT time,user,type FROM " + source.table()
-                            + " WHERE wid = " + WORLD + " AND x = " + X + " AND z = " + Z + " AND y = " + Y + " ORDER BY rowid")) {
+            try (ResultSet results = source.all("time,user,type", place(), "rowid ASC")) {
                 int seen = 0;
                 while (results.next()) {
                     seen++;
@@ -128,7 +125,7 @@ class InspectorSourceTest {
         seal();
 
         InspectorSource source = InspectorSource.open(connection, "block", WORLD, X, X, Z, Z, 0);
-        assertTrue(countThrough(source) > 0);
+        assertEquals(7, pageThrough(source, 100, 7));
         source.close();
 
         // A source left open would hold its scratch table for as long as the connection lived, and
@@ -143,11 +140,12 @@ class InspectorSourceTest {
     void aDatabaseWithNothingPackedAwayStillReadsTheLiveTable() throws Exception {
         write(50, X, Z);
 
+        long written = ColdSegmentReadCounter.scratchRows();
         try (InspectorSource source = InspectorSource.open(connection, "block", WORLD, X, X, Z, Z, 0)) {
-            assertEquals(ConfigHandler.prefix + "block", source.table(), "with no segments there is nothing to union with");
-            assertFalse(source.index().isEmpty(), "and the index on the live table is still worth hinting");
             assertEquals(50, countThrough(source));
+            assertEquals(7, pageThrough(source, 0, 7));
         }
+        assertEquals(written, ColdSegmentReadCounter.scratchRows(), "with no segments nothing is copied anywhere");
     }
 
     @Test
@@ -166,11 +164,7 @@ class InspectorSourceTest {
 
         long boundary = ColdSegmentReadCounter.reads();
         try (InspectorSource source = InspectorSource.openForEntity(connection, "entity_interaction", 2)) {
-            try (Statement statement = connection.createStatement();
-                    ResultSet results = statement.executeQuery("SELECT COUNT(*) FROM " + source.table() + " WHERE entity_spawn_rowid = 2")) {
-                assertTrue(results.next());
-                assertEquals(300, results.getLong(1), "the entity's rows are found in compressed storage");
-            }
+            assertEquals(300, source.count("entity_spawn_rowid = 2"), "the entity's rows are found in compressed storage");
         }
         long read = ColdSegmentReadCounter.reads() - boundary;
 
@@ -196,13 +190,22 @@ class InspectorSourceTest {
         connection.setAutoCommit(true);
     }
 
-    private long countThrough(InspectorSource source) throws SQLException {
-        String query = "SELECT COUNT(*) FROM " + source.table() + " " + source.index()
-                + "WHERE wid = " + WORLD + " AND x = " + X + " AND z = " + Z + " AND y = " + Y;
-        try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery(query)) {
-            assertTrue(results.next());
-            return results.getLong(1);
+    private static String place() {
+        return "wid = " + WORLD + " AND x = " + X + " AND z = " + Z + " AND y = " + Y;
+    }
+
+    private static long countThrough(InspectorSource source) throws Exception {
+        return source.count(place());
+    }
+
+    private static int pageThrough(InspectorSource source, long offset, int limit) throws Exception {
+        int rows = 0;
+        try (ResultSet results = source.page("time,user,type", place(), "rowid DESC", offset, limit)) {
+            while (results.next()) {
+                rows++;
+            }
         }
+        return rows;
     }
 
     private long segmentCount() throws SQLException {

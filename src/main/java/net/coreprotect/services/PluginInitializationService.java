@@ -157,6 +157,7 @@ public class PluginInitializationService {
         Consumer.startConsumer();
         EntitySpawnTracking.initializeLoadedEntities();
         AutoPurgeService.start();
+        StoragePackingService.start();
         Extensions.startBackgroundService();
     }
 }

@@ -73,16 +73,10 @@ public class BlockLookup {
             }
             else {
                 // Compressed storage as well as the live rows, so a block's whole history is shown
-                // rather than only what happened to it inside the hot window.
+                // wherever each row of it currently sits. Only the page's own rows are read, and the
+                // page count is taken while the page is planned.
                 source = InspectorSource.open(statement.getConnection(), "block", worldId, x, x, z, z, checkTime);
-                query = "SELECT COUNT(*) as count from " + source.table() + " " + source.index() + "WHERE " + where + " LIMIT 1 OFFSET 0";
-                results = statement.executeQuery(query);
-                while (results.next()) {
-                    count = results.getInt("count");
-                }
-                results.close();
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back FROM " + source.table() + " " + source.index() + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + page_start;
-                results = statement.executeQuery(query);
+                results = source.page("time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back", where, ConfigHandler.getDescendingEventOrder(), page_start, limit);
             }
 
             StringBuilder resultTextBuilder = new StringBuilder();
@@ -163,6 +157,9 @@ public class BlockLookup {
 
             resultText = resultTextBuilder.toString();
             results.close();
+            if (source != null) {
+                count = (int) source.count(where);
+            }
             int totalPages = (int) Math.ceil(count / (limit + 0.0));
 
             if (found) {

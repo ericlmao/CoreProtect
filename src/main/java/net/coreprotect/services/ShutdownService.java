@@ -47,6 +47,7 @@ public class ShutdownService {
         try {
             Consumer.blockDatabaseReloadForShutdown();
             AutoPurgeService.stop();
+            StoragePackingService.stop();
             Extensions.stopBackgroundService();
 
             // Log disconnections of online players if server is stopping
@@ -137,7 +138,7 @@ public class ShutdownService {
 
     static void waitForMaintenanceCompletion(long shutdownTime) throws InterruptedException {
         while (ConfigHandler.purgeRunning || Consumer.isBackgroundPurgeRunning() || PurgeCommand.isPurgeWorkerRunning()
-                || Consumer.isDatabaseReloadRunning()) {
+                || Consumer.isDatabaseReloadRunning() || StoragePackingService.isWorking()) {
             if ((System.currentTimeMillis() - shutdownTime) >= MAX_SHUTDOWN_WAIT_MS) {
                 return;
             }

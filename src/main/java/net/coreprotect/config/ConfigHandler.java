@@ -620,12 +620,24 @@ public class ConfigHandler extends Queue {
         config.addDataSourceProperty("journal_mode", walEnabled ? "WAL" : "DELETE");
         config.addDataSourceProperty("synchronous", walEnabled ? "NORMAL" : "FULL");
         config.addDataSourceProperty("busy_timeout", "30000");
-        config.addDataSourceProperty("cache_size", "-16384");
-        config.addDataSourceProperty("mmap_size", "268435456");
+        // The page cache is per connection, and what a lookup reads out of compressed storage is
+        // read from it: a few hundred segments at 150 KB each. Sixteen megabytes held none of a
+        // second page's segments; this holds them, and the mapping lets the segment table be read
+        // without copying. Both are ceilings, not allocations.
+        config.addDataSourceProperty("cache_size", "-262144");
+        config.addDataSourceProperty("mmap_size", "4294967296");
         // Temporary tables stay on disk. A lookup that reaches far back through compressed storage
-        // can build a very large one, and holding that in memory can take the server down.
+        // can build a large one, and holding that in memory can take the server down.
         config.addDataSourceProperty("temp_store", "FILE");
-        return new HikariDataSource(config);
+        HikariDataSource dataSource = new HikariDataSource(config);
+        // And on the disk the database is on, rather than in the system's temporary directory.
+        try (Connection connection = dataSource.getConnection()) {
+            SQLiteSchema.useTemporaryDirectory(connection);
+        }
+        catch (SQLException exception) {
+            ErrorReporter.report(exception);
+        }
+        return dataSource;
     }
 
     public static boolean loadMaterials(Statement statement) {

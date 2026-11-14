@@ -1,9 +1,7 @@
 package net.coreprotect.api;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -60,26 +58,22 @@ public class SessionLookup {
                 return result;
             }
 
-            // Prepare lookup parameters
             String type = String.valueOf(ID);
-            int time = (int) (System.currentTimeMillis() / 1000L);
-            int checkTime = calculateCheckTime(time, offset);
-
             Integer userId = MessageAPI.getUserId(connection, user);
             if (userId == null || userId < 0) {
                 return result;
             }
 
-            // Query session data from database
-            try (Statement statement = connection.createStatement()) {
-                String query = buildSessionQuery(userId, checkTime);
-
-                try (ResultSet results = statement.executeQuery(query)) {
-                    while (results.next()) {
-                        String[] sessionData = extractSessionData(connection, results, type);
-                        result.add(sessionData);
-                    }
-                }
+            // The same lookup as the typed one, which on SQLite reads the packed sessions together
+            // with the live rows a bounded window of the history at a time.
+            LookupFilter filter = LookupFilter.fromOptions(connection, LookupOptions.builder().user(user).time(Math.max(0, offset)).build());
+            try {
+                String where = filter.where("");
+                String query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,action FROM " + filter.table(connection, "session", "", where, 0) + " WHERE " + where;
+                filter.read(connection, query, " ORDER BY " + ConfigHandler.getDescendingEventOrder(), filter::bind, results -> result.add(extractSessionData(connection, results, type)));
+            }
+            finally {
+                filter.close();
             }
         }
         catch (Exception e) {
@@ -113,23 +107,17 @@ public class SessionLookup {
                 return result;
             }
 
-            StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,action FROM ");
-            query.append(filter.table(connection, "session", "")).append(' ');
-            if (filter.hasLocation() && !ConfigHandler.databaseType.isDuckDB()) {
-                query.append(WorldUtils.getWidIndex("session"));
+            try {
+                String where = filter.where("");
+                StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,action FROM ");
+                query.append(filter.table(connection, "session", "", where, 0)).append(' ');
+                query.append(filter.index("session"));
+                query.append("WHERE ").append(where);
+
+                filter.read(connection, query.toString(), " ORDER BY " + ConfigHandler.getDescendingEventOrder(), filter::bind, results -> result.add(parseSessionResult(connection, results)));
             }
-            filter.appendWhere(query);
-            query.append(" ORDER BY ").append(ConfigHandler.getDescendingEventOrder());
-            filter.appendLimit(query);
-
-            try (PreparedStatement statement = connection.prepareStatement(query.toString())) {
-                filter.bind(statement);
-
-                try (ResultSet results = statement.executeQuery()) {
-                    while (results.next()) {
-                        result.add(parseSessionResult(connection, results));
-                    }
-                }
+            finally {
+                filter.close();
             }
         }
         catch (Exception e) {
@@ -137,32 +125,6 @@ public class SessionLookup {
         }
 
         return result;
-    }
-
-    /**
-     * Calculates the time threshold for the session lookup.
-     * 
-     * @param currentTime
-     *            The current time in seconds
-     * @param offset
-     *            The time offset in seconds
-     * @return The calculated time threshold
-     */
-    private static int calculateCheckTime(int currentTime, int offset) {
-        return (offset > 0) ? currentTime - offset : 0;
-    }
-
-    /**
-     * Builds the SQL query for retrieving session data.
-     * 
-     * @param userId
-     *            The user ID to query for
-     * @param checkTime
-     *            The time threshold for the query
-     * @return The SQL query string
-     */
-    private static String buildSessionQuery(int userId, int checkTime) {
-        return "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,action FROM " + ConfigHandler.prefix + "session WHERE " + ConfigHandler.databaseType.getUserColumn() + " = " + userId + " AND time > " + checkTime + " ORDER BY " + ConfigHandler.getDescendingEventOrder();
     }
 
     /**

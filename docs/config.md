@@ -57,16 +57,18 @@ Multiple active CoreProtect installations may share one ClickHouse database and 
 
 ## Data Compression
 
-SQLite installations keep recent activity in fast indexed tables and pack older activity into compressed storage, which measured 11x smaller than the previous layout on a test database. See the [storage layout guide](/storage-layout/) for how it works and what it changes.
+SQLite installations pack activity into compressed storage as it is logged, which measured about 9x smaller than the previous layout on a test database. There is no separate recent and old data: every lookup reads packed and not yet packed activity together. See the [storage layout guide](/storage-layout/) for how it works and what it changes.
 
 ```yaml
-hot-window: 7d
 blob-compression: true
 blob-compression-level: 19
-hot-blob-compression-level: 3
+log-blob-compression-level: 3
+lookup-cache-mb: 128
 ```
 
-`hot-window` decides how much recent history stays instantly searchable before it is compressed. `blob-compression-level` (1 fastest, 22 smallest) applies when data is compressed for storage; `hot-blob-compression-level` applies to freshly logged data, which is recompressed properly later, so keeping it low keeps logging cheap.
+`blob-compression-level` (1 fastest, 22 smallest) applies when activity is packed. `log-blob-compression-level` applies to item and block data as it is logged, while it waits to be packed, so keeping it low keeps logging cheap. `lookup-cache-mb` is memory kept for recently unpacked activity, so repeated inspector clicks, paging and rollback previews do not unpack it again.
+
+Older builds called the logging level `hot-blob-compression-level`; that name is still read. The old `hot-window` and `cold-max-rows` settings no longer exist and are ignored: there is no limit on how far back a lookup may read.
 
 DuckDB and ClickHouse compress their own storage, so these settings do not apply to them, and MySQL stores item data compressed but is otherwise unchanged. If the Zstandard native library cannot be loaded on your system, CoreProtect logs a warning and stores data uncompressed.
 

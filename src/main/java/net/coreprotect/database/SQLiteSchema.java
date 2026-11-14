@@ -47,6 +47,51 @@ public final class SQLiteSchema {
     }
 
     /**
+     * @return the directory SQLite writes its temporary files to: the one the database lives in
+     */
+    public static Path temporaryDirectory() {
+        return databaseFile().toAbsolutePath().getParent();
+    }
+
+    /**
+     * Points SQLite's temporary files at the directory the database lives in.
+     *
+     * <p>
+     * Temporary tables, and sorts too large for memory, are written to files. By default those go
+     * to the operating system's temporary directory, which is often a small partition of its own,
+     * or memory itself, and filling it can take the whole server down with it. The storage
+     * directory is where the data already lives and is sized for it, and a full disk there stops
+     * only the lookup that filled it.
+     * </p>
+     *
+     * <p>
+     * The setting belongs to the SQLite library rather than to one connection, so every connection
+     * the plugin opens ends up using it. Changing it while another thread is using SQLite is not
+     * safe, which is why it is only written when it differs, which after the first connection it
+     * never does, rather than passed to the driver to set on every connection it opens.
+     * </p>
+     *
+     * @param connection
+     *            an open connection to the database
+     * @throws SQLException
+     *             if the setting cannot be read or written
+     */
+    public static synchronized void useTemporaryDirectory(Connection connection) throws SQLException {
+        String directory = temporaryDirectory().toString();
+        try (Statement statement = connection.createStatement()) {
+            String current = null;
+            try (ResultSet results = statement.executeQuery("PRAGMA temp_store_directory")) {
+                if (results.next()) {
+                    current = results.getString(1);
+                }
+            }
+            if (!directory.equals(current)) {
+                statement.executeUpdate("PRAGMA temp_store_directory = '" + directory.replace("'", "''") + "'");
+            }
+        }
+    }
+
+    /**
      * Prepares the database file before any connection pool is opened.
      *
      * <p>
@@ -138,9 +183,29 @@ public final class SQLiteSchema {
                 + "row_count INTEGER NOT NULL, min_time INTEGER NOT NULL, max_time INTEGER NOT NULL, day INTEGER NOT NULL, "
                 + "wid_set BLOB, chunk_filter BLOB, user_filter BLOB, type_filter BLOB, action_bits INTEGER NOT NULL, "
                 + "dict_id INTEGER NOT NULL, codec_version INTEGER NOT NULL, scalars BLOB NOT NULL, scalars_size INTEGER NOT NULL, "
-                + "payload BLOB, payload_size INTEGER NOT NULL, user_stats BLOB, type_stats BLOB, action_stats BLOB, spawn_filter BLOB);");
+                + "payload BLOB, payload_size INTEGER NOT NULL, user_stats BLOB, type_stats BLOB, action_stats BLOB, spawn_filter BLOB, chunk_counts BLOB);");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS " + prefix + "segment_rowid_index ON " + prefix + "segment(table_id,end_rowid);");
         statement.executeUpdate("CREATE INDEX IF NOT EXISTS " + prefix + "segment_time_index ON " + prefix + "segment(table_id,max_time);");
+
+        // The unit bodies of segments written since version 4 of the segment format, one row per
+        // unit, so a lookup reads the directory from the segment row and then only the units that
+        // hold what it wants. Rows of older segments keep their bodies inside the scalar frame and
+        // have no rows here. A body is tens of kilobytes, so this is an ordinary table with its key
+        // in a separate index: without row ids, SQLite keeps up to two kilobytes of every row in
+        // the interior pages of the tree, which leaves a handful of rows per interior page and a
+        // tree twice as deep as this one. Here the key index is small enough to stay in memory and
+        // a read goes from it straight to the row.
+        //
+        // A compacted segment keeps each unit's share of the text and blob bytes here too, beside the
+        // unit's body, compressed on its own with the table's dictionary; its segment row then has
+        // no payload and records only the payload's size. A compacted segment holds up to a million
+        // rows, and a lookup wanting one item's data reads the one share that holds it rather than
+        // the payload of the whole segment. Segments written by packing keep their payload in the
+        // segment row, and their unit rows have none.
+        statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "segment_unit ("
+                + "segment_id INTEGER NOT NULL, unit INTEGER NOT NULL, body BLOB NOT NULL, payload BLOB, "
+                + "PRIMARY KEY (segment_id, unit));");
+        addColumn(prefix + "segment_unit", statement, "payload", "BLOB");
 
         statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "segment_dict ("
                 + "dict_id INTEGER PRIMARY KEY, table_id INTEGER NOT NULL, time INTEGER NOT NULL, sample_bytes INTEGER NOT NULL, "
@@ -165,19 +230,35 @@ public final class SQLiteSchema {
         // Which entities a segment holds rows for, so the inspector can look one up without opening
         // segments that hold nothing of it.
         addSegmentColumn(prefix, statement, "spawn_filter");
+        // How many rows a segment holds in each chunk, exactly, so a lookup about a place skips every
+        // segment with nothing there and counts whole chunks without reading them. Segments written
+        // before it existed are counted by the backfill and fall back to their chunk filter until then.
+        addSegmentColumn(prefix, statement, "chunk_counts");
+        // How far a segment has come through compaction, which merges the many segments of a day
+        // that is over into a few ordered by place across the whole day. See SegmentCompactor for
+        // what each value means; a segment still being written by compaction is negative, and is
+        // invisible to everything but the compaction that is writing it.
+        addColumn(prefix + "segment", statement, "compacted", "INTEGER NOT NULL DEFAULT 0");
+        // Lets the background packing tell whether anything is left to compact from the index alone,
+        // every time it finds nothing to pack, without reading the segment rows.
+        statement.executeUpdate("CREATE INDEX IF NOT EXISTS " + prefix + "segment_compacted_index ON " + prefix + "segment(compacted,codec_version,day);");
 
         recordSchemaVersion(prefix, statement);
     }
 
     private static void addSegmentColumn(String prefix, Statement statement, String column) throws SQLException {
-        try (ResultSet results = statement.executeQuery("PRAGMA table_info(" + prefix + "segment)")) {
+        addColumn(prefix + "segment", statement, column, "BLOB");
+    }
+
+    private static void addColumn(String table, Statement statement, String column, String definition) throws SQLException {
+        try (ResultSet results = statement.executeQuery("PRAGMA table_info(" + table + ")")) {
             while (results.next()) {
                 if (column.equalsIgnoreCase(results.getString("name"))) {
                     return;
                 }
             }
         }
-        statement.executeUpdate("ALTER TABLE " + prefix + "segment ADD COLUMN " + column + " BLOB");
+        statement.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
     }
 
     private static void recordSchemaVersion(String prefix, Statement statement) throws SQLException {
