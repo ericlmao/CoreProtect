@@ -20,7 +20,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-import net.coreprotect.config.Config;
 import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
@@ -72,8 +71,6 @@ public final class LegacyImport {
      * the data itself.
      */
     private static final int BATCH_ROWS = 20000;
-
-    private static final long SECONDS_PER_DAY = 86400L;
 
     /** Seconds between progress lines in the console. */
     private static final long PROGRESS_INTERVAL = 15;
@@ -432,7 +429,7 @@ public final class LegacyImport {
             checkpoint(connection);
 
             if (seal) {
-                ColdRollupTask.sealTable(connection, table, sealBefore(), frontier, LegacyImport::checkCancelled);
+                ColdRollupTask.sealTable(connection, table, frontier, LegacyImport::checkCancelled);
             }
 
             int percent = (int) ((frontier * 100L) / last);
@@ -689,14 +686,6 @@ public final class LegacyImport {
     }
 
     /**
-     * @return the cutoff the import seals below, matching the nightly roll-up's rule
-     */
-    private static long sealBefore() {
-        long now = System.currentTimeMillis() / 1000L;
-        return Math.min(now - Config.getGlobal().HOT_WINDOW_SECONDS, (now / SECONDS_PER_DAY) * SECONDS_PER_DAY);
-    }
-
-    /**
      * Stops the import when the server is going down. Shutdown waits for the import to finish, so it
      * has to notice promptly; what has been copied stays, and the rest resumes on the next start.
      */
@@ -887,6 +876,7 @@ public final class LegacyImport {
         try (Statement statement = connection.createStatement()) {
             statement.executeUpdate("PRAGMA busy_timeout=30000");
         }
+        SQLiteSchema.useTemporaryDirectory(connection);
         return connection;
     }
 

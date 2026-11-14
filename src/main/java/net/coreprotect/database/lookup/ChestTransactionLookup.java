@@ -85,13 +85,11 @@ public class ChestTransactionLookup {
             String table = ConfigHandler.prefix + "container";
             String tableName = "container";
             String where = LocationQuery.predicate("wid", " = " + worldId) + " AND (" + LocationQuery.predicate("x", " = " + x) + " OR " + LocationQuery.predicate("x", " = " + x2) + ") AND (" + LocationQuery.predicate("z", " = " + z) + " OR " + LocationQuery.predicate("z", " = " + z2) + ") AND y = " + y;
-            String index = WorldUtils.getWidIndex("container");
             String order = ConfigHandler.getDescendingEventOrder();
             if (entitySpawnRowId != null) {
                 table = ConfigHandler.prefix + "entity_container";
                 tableName = "entity_container";
                 where = "entity_spawn_rowid = " + entitySpawnRowId;
-                index = "";
                 order = "time DESC,rowid DESC";
 
                 EntitySpawnRecord record = EntitySpawnStatement.loadLocationRecords(statement.getConnection(), Collections.singleton(entitySpawnRowId)).get(entitySpawnRowId);
@@ -138,8 +136,6 @@ public class ChestTransactionLookup {
                     // Rows about an entity are narrowed by which segments hold rows for it, since
                     // there are no coordinates to narrow them by.
                     source = InspectorSource.openForEntity(statement.getConnection(), tableName, entitySpawnRowId);
-                    table = source.table();
-                    index = source.index();
                 }
                 else {
                     // Compressed storage as well as the live rows. A lookup by entity instead of by
@@ -150,17 +146,10 @@ public class ChestTransactionLookup {
                     int minimumZ = exact ? l.getBlockZ() : Math.min(z, z2);
                     int maximumZ = exact ? l.getBlockZ() : Math.max(z, z2);
                     source = InspectorSource.open(statement.getConnection(), tableName, worldId, minimumX, maximumX, minimumZ, maximumZ, 0);
-                    table = source.table();
-                    index = source.index();
                 }
-                query = "SELECT COUNT(*) as count FROM " + table + " " + index + "WHERE " + where + " LIMIT 1 OFFSET 0";
-                results = statement.executeQuery(query);
-                while (results.next()) {
-                    count = results.getInt("count");
-                }
-                results.close();
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,action,type,data,amount,metadata,rolled_back FROM " + table + " " + index + "WHERE " + where + " ORDER BY " + order + " LIMIT " + limit + " OFFSET " + pageStart;
-                results = statement.executeQuery(query);
+                // Only the page's own rows are read, and the page count is taken while the page
+                // is planned.
+                results = source.page("time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,action,type,data,amount,metadata,rolled_back", where, order, pageStart, limit);
             }
             while (results.next()) {
                 if (combinedDuckDBPage) {
@@ -216,6 +205,9 @@ public class ChestTransactionLookup {
                 PluginChannelListener.getInstance().sendData(commandSender, resultTime, Phrase.LOOKUP_CONTAINER, selector, resultUser, target, resultAmount, displayX, displayY, displayZ, displayWorldId, rbFormat, true, tag.contains("+"));
             }
             results.close();
+            if (source != null) {
+                count = (int) source.count(where);
+            }
             int totalPages = (int) Math.ceil(count / (limit + 0.0));
 
             if (found) {

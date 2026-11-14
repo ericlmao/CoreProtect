@@ -200,9 +200,10 @@ public class StatusCommand {
                 return;
             }
 
-            Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_HOT_DATA, Color.WHITE, ColdStorageStats.format(stats.getHotBytes())));
-            Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_COLD_DATA, Color.WHITE, ColdStorageStats.format(stats.getColdBytes()),
-                    String.format("%,d", stats.getColdRows()), (stats.getColdRows() == 1 ? Selector.FIRST : Selector.SECOND)));
+            // Where a row currently sits is an implementation detail, so storage is reported as one.
+            long storedRows = stats.getStoredRows();
+            Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_STORAGE, Color.WHITE, ColdStorageStats.format(stats.getHotBytes() + stats.getColdBytes()),
+                    String.format("%,d", storedRows), (storedRows == 1 ? Selector.FIRST : Selector.SECOND)));
             if (stats.getBlobBytes() > 0 || stats.getBlobSavedBytes() > 0) {
                 Chat.sendMessage(player, Color.DARK_AQUA + Phrase.build(Phrase.STATUS_ENTITY_DATA, Color.WHITE,
                         ColdStorageStats.format(stats.getBlobBytes()), ColdStorageStats.format(stats.getBlobSavedBytes())));

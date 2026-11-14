@@ -60,22 +60,19 @@ public final class EntityInteractionLookup {
             DisplayLocation displayLocation = resolveDisplayLocation(record, liveLocation);
             boolean found = false;
             boolean combinedDuckDBPage = ConfigHandler.databaseType.isDuckDB();
-            String query;
+            ResultSet pageRows;
             if (combinedDuckDBPage) {
                 String sourceTable = DuckDBLookupQuery.entityTable(statement.getConnection(), "entity_interaction", Collections.singleton(entitySpawnRowId), "spatial_rows");
                 String columns = "data_rows.time,data_rows." + ConfigHandler.databaseType.getUserColumn() + ",data_rows.wid,data_rows.x,data_rows.y,data_rows.z,data_rows.type,data_rows.action,data_rows.rolled_back";
-                query = DuckDBLookupQuery.pageQuery(sourceTable, ConfigHandler.prefix + "entity_interaction", where, columns, true, limit, pageStart);
+                pageRows = statement.executeQuery(DuckDBLookupQuery.pageQuery(sourceTable, ConfigHandler.prefix + "entity_interaction", where, columns, true, limit, pageStart));
             }
             else {
                 // Compressed storage as well as the live rows, narrowed to the segments that hold
-                // rows for this entity.
+                // rows for this entity, reading only the page's own rows.
                 source = InspectorSource.openForEntity(statement.getConnection(), "entity_interaction", entitySpawnRowId);
-                try (ResultSet results = statement.executeQuery("SELECT COUNT(*) AS count FROM " + source.table() + " WHERE " + where)) {
-                    count = results.next() ? results.getInt("count") : 0;
-                }
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,type,action,rolled_back FROM " + source.table() + " WHERE " + where + " ORDER BY time DESC,rowid DESC LIMIT " + limit + " OFFSET " + pageStart;
+                pageRows = source.page("time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,type,action,rolled_back", where, "time DESC,rowid DESC", pageStart, limit);
             }
-            try (ResultSet results = statement.executeQuery(query)) {
+            try (ResultSet results = pageRows) {
                 while (results.next()) {
                     if (combinedDuckDBPage) {
                         count = results.getInt("count");
@@ -113,6 +110,9 @@ public final class EntityInteractionLookup {
                 }
             }
 
+            if (source != null) {
+                count = (int) source.count(where);
+            }
             if (found && count > limit) {
                 int totalPages = (int) Math.ceil(count / (limit + 0.0));
                 result.add(Color.WHITE + "-----");

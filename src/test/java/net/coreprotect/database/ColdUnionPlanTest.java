@@ -24,11 +24,10 @@ import net.coreprotect.config.ConfigHandler;
  * The gate for planning a page of a lookup that reads several tables at once.
  *
  * <p>
- * Those results are merged by time rather than by row id, so a page cannot be planned by skipping
- * rows in one table alone. Instead the whole query is limited to rows at or below a timestamp, and
- * its offset is reduced by exactly how many matching rows lie above that timestamp. Because time is
- * the first thing the merge sorts by, the rows removed are exactly the ones the page was going to
- * skip past, which is what makes the arithmetic sound.
+ * Those results are merged by time rather than by row id, and then by table and row id where times
+ * tie, so a page cannot be planned by skipping rows in one table alone. Instead the planner finds
+ * the first and last row of the page in that order and confines every table to the stretch between
+ * them, so the query reads the page with no offset at all.
  * </p>
  *
  * <p>
@@ -112,41 +111,6 @@ class ColdUnionPlanTest {
     }
 
     @Test
-    void aReadStopsAtTheLimitEvenWhenItWasNotExpectedTo() throws Exception {
-        seal();
-        int limit = net.coreprotect.config.Config.getGlobal().COLD_MAX_ROWS;
-        net.coreprotect.config.Config.getGlobal().COLD_MAX_ROWS = 10000;
-        try {
-            // A budget under the limit that nonetheless walks a lot of rows must still stop, so a
-            // read can never grow beyond what the limit allows whatever the plan expected.
-            SQLiteColdIndex.beginLookup(0, 0);
-            try {
-                SQLiteColdIndex.setLookupFilters("", "");
-                SQLiteColdIndex.setRowBudget(9999);
-                SQLiteColdIndex.sourceExpression(connection, "block", 1, null);
-                assertTrue(count("SELECT COUNT(*) FROM sqlite_temp_master WHERE name = 'cp_cold_block'") == 0
-                        || count("SELECT COUNT(*) FROM temp.cp_cold_block") <= 10001, "a read never exceeds the limit");
-            }
-            finally {
-                SQLiteColdIndex.endLookup(connection);
-            }
-        }
-        finally {
-            net.coreprotect.config.Config.getGlobal().COLD_MAX_ROWS = limit;
-        }
-    }
-
-    @Test
-    void aPlainUserLookupIsRecognisedAsReadingSeveralTables() throws Exception {
-        // This is the shape of "/co lookup user:X time:1d": a lookup with no actions given, which
-        // reads blocks together with container and item history and merges them by time.
-        assertEquals(4, LookupRawAccess.unionTables(new ArrayList<>(), true, "block").length,
-                "a plain user lookup merges block, container, entity container and item");
-        assertEquals(1, LookupRawAccess.unionTables(new ArrayList<>(List.of(net.coreprotect.model.action.LookupActions.BLOCK_BREAK)), false, "block").length,
-                "a lookup restricted to one action reads one table");
-    }
-
-    @Test
     void planningActuallyCutsTheWorkDown() throws Exception {
         seal();
         int deep = ((ROWS_PER_DAY * DAYS * 3) / USERS) - 20;
@@ -167,6 +131,16 @@ class ColdUnionPlanTest {
         return lastRowsRead;
     }
 
+    @Test
+    void aPlannedPageHoldsNoMoreThanItsOwnRows() throws Exception {
+        seal();
+        int owned = (ROWS_PER_DAY * DAYS * 3) / USERS;
+        for (int offset : new int[] { 0, owned / 2, owned - 4, owned - 2 }) {
+            unionPage(1, offset, 4, 0, 0, true);
+            assertTrue(lastRowsRead <= 4, "a page at " + offset + " decodes only its own rows, decoded " + lastRowsRead);
+        }
+    }
+
     private long lastRowsRead;
 
     /**
@@ -174,34 +148,35 @@ class ColdUnionPlanTest {
      */
     private List<String> unionPage(long user, int offset, int pageSize, long startTime, long endTime, boolean planned) throws Exception {
         String[] tables = { "block", "container", "item" };
+        String clause = " user = " + user + (startTime > 0 ? " AND time > " + startTime : "") + (endTime > 0 ? " AND time <= " + endTime : "");
+        List<ColdPagePlan.Branch> branches = new ArrayList<>();
+        for (int index = 0; index < tables.length; index++) {
+            branches.add(new ColdPagePlan.Branch(tables[index], index, clause, 1, null));
+        }
         List<String> page = new ArrayList<>();
         lastRowsRead = 0;
 
-        ColdUnionPlan plan = planned
-                ? ColdUnionPlan.forPage(connection, tables, Long.toString(user), "", null, null, null, null, startTime, endTime, offset)
-                : ColdUnionPlan.none();
+        ColdPagePlan plan = planned ? ColdPagePlan.plan(connection, branches, true, "user", offset, pageSize) : null;
+        assertTrue(!planned || plan != null, "a lookup of one player can be planned");
+        long effectiveOffset = plan == null ? offset : 0;
 
-        long effectiveEnd = plan.getCutTime() > 0 ? plan.getCutTime() : endTime;
-        long effectiveOffset = offset - plan.getSkippedRows();
-
-        SQLiteColdIndex.beginLookup(startTime, effectiveEnd);
+        SQLiteColdIndex.beginLookup(startTime, endTime);
         try {
-            SQLiteColdIndex.setLookupFilters(Long.toString(user), "");
-            SQLiteColdIndex.setRowBudget(effectiveOffset + pageSize);
-
             StringBuilder union = new StringBuilder();
             for (int index = 0; index < tables.length; index++) {
+                SQLiteColdIndex.setPredicateFilters(clause, "user");
+                if (plan != null) {
+                    SQLiteColdIndex.setPageWindow(tables[index], plan.window(tables[index]));
+                }
                 String source = SQLiteColdIndex.sourceExpression(connection, tables[index], 1, null);
-                if (source.startsWith("(")) {
+                if (source.contains("temp.cp_cold_")) {
                     lastRowsRead = lastRowsRead + count("SELECT COUNT(*) FROM temp.cp_cold_" + tables[index]);
                 }
                 if (index > 0) {
                     union.append(" UNION ALL ");
                 }
                 union.append("SELECT * FROM (SELECT '").append(index).append("' tbl, rowid id, time FROM ").append(source)
-                        .append(" WHERE user = ").append(user)
-                        .append(startTime > 0 ? " AND time > " + startTime : "")
-                        .append(effectiveEnd > 0 ? " AND time <= " + effectiveEnd : "")
+                        .append(" WHERE").append(clause)
                         .append(" ORDER BY time DESC, id DESC LIMIT ").append(effectiveOffset + pageSize).append(')');
             }
 

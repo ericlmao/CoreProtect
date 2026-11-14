@@ -36,7 +36,7 @@ CoreProtect logs the next scheduled run when the server starts and again after a
 
 Automatic purging runs in the background. SQLite, MySQL, and DuckDB remove old rows incrementally in small batches with short pauses between database work, exactly as a manual purge does. ClickHouse uses its columnar retention path, dropping fully covered monthly partitions for an unfiltered time purge and synchronously removing rows from any partially covered partition.
 
-On SQLite, the automatic purge also packs activity that has aged out of the hot window into compressed storage, and removes expired compressed data by dropping whole segments. See the [storage layout guide](/storage-layout/).
+On SQLite, activity is packed into compressed storage continuously as it is logged; the automatic purge packs anything that is still waiting, and removes expired compressed data by dropping whole segments. See the [storage layout guide](/storage-layout/).
 
 Rows are always deleted in place. Neither an automatic nor a manual purge ever copies the database into a second file, so purging does not require additional free disk space and cannot leave a duplicate database behind.
 

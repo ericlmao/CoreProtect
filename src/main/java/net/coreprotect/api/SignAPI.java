@@ -1,7 +1,6 @@
 package net.coreprotect.api;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
@@ -52,31 +51,21 @@ public class SignAPI {
                 return result;
             }
 
-            StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,action,color,color_secondary,data,waxed,face,line_1,line_2,line_3,line_4,line_5,line_6,line_7,line_8 FROM ");
-            query.append(filter.table(connection, "sign", "")).append(' ');
-            if (filter.hasLocation() && !ConfigHandler.databaseType.isDuckDB()) {
-                query.append(WorldUtils.getWidIndex("sign"));
+            try {
+                List<String> messageBindings = new ArrayList<>();
+                String where = LookupRaw.appendMessageFilters(filter.where(""),
+                        options == null ? List.of() : options.getTextStartsWithAny(),
+                        options == null ? List.of() : options.getTextStartsWithNone(), "sign", messageBindings);
+                where = where + " AND action = '" + SignActions.PLACE + "' AND (LENGTH(line_1) > 0 OR LENGTH(line_2) > 0 OR LENGTH(line_3) > 0 OR LENGTH(line_4) > 0 OR LENGTH(line_5) > 0 OR LENGTH(line_6) > 0 OR LENGTH(line_7) > 0 OR LENGTH(line_8) > 0)";
+                StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,action,color,color_secondary,data,waxed,face,line_1,line_2,line_3,line_4,line_5,line_6,line_7,line_8 FROM ");
+                query.append(filter.table(connection, "sign", "", where, 0)).append(' ');
+                query.append(filter.index("sign"));
+                query.append("WHERE ").append(where);
+
+                filter.read(connection, query.toString(), " ORDER BY " + ConfigHandler.getDescendingEventOrder(), filter::bind, messageBindings, results -> result.add(parseSignResult(connection, results)));
             }
-            filter.appendWhere(query);
-            List<String> messageBindings = new ArrayList<>();
-            query = new StringBuilder(LookupRaw.appendMessageFilters(query.toString(),
-                    options == null ? List.of() : options.getTextStartsWithAny(),
-                    options == null ? List.of() : options.getTextStartsWithNone(), "sign", messageBindings));
-            query.append(" AND action = '").append(SignActions.PLACE).append("' AND (LENGTH(line_1) > 0 OR LENGTH(line_2) > 0 OR LENGTH(line_3) > 0 OR LENGTH(line_4) > 0 OR LENGTH(line_5) > 0 OR LENGTH(line_6) > 0 OR LENGTH(line_7) > 0 OR LENGTH(line_8) > 0)");
-            query.append(" ORDER BY ").append(ConfigHandler.getDescendingEventOrder());
-            filter.appendLimit(query);
-
-            try (PreparedStatement statement = connection.prepareStatement(query.toString())) {
-                int parameterIndex = filter.bind(statement);
-                for (String binding : messageBindings) {
-                    statement.setString(parameterIndex++, binding);
-                }
-
-                try (ResultSet results = statement.executeQuery()) {
-                    while (results.next()) {
-                        result.add(parseSignResult(connection, results));
-                    }
-                }
+            finally {
+                filter.close();
             }
         }
         catch (Exception e) {

@@ -191,11 +191,14 @@ class DatabaseRebuildTest {
     void aRebuiltFileStillReadsItsCompressedStorage() throws Exception {
         // A smaller file that cannot be read back is worthless, so this seals rows into segments
         // first and reads them afterwards.
+        long units;
         try (Connection connection = open()) {
             ColdRollupTask.rollUp(connection, () -> {
             }, (System.currentTimeMillis() / 1000L) + 1);
             SQLiteColdIndex.reload(connection);
+            units = pragma(connection, "SELECT COUNT(*) FROM co_segment_unit");
         }
+        assertTrue(units > 0, "the segments store their units apart");
 
         DatabaseRebuild.rebuild(database, SMALL_ENOUGH);
 
@@ -203,6 +206,11 @@ class DatabaseRebuildTest {
             SQLiteColdIndex.invalidate();
             SQLiteColdIndex.reload(connection);
             assertTrue(pragma(connection, "SELECT COUNT(*) FROM co_segment") > 0, "the segments came across");
+            assertEquals(units, pragma(connection, "SELECT COUNT(*) FROM co_segment_unit"), "and so did their units");
+            SegmentUnitStorageTest.assertUnitsMatchSegments(connection);
+            for (SQLiteColdIndex.ColdSegment segment : SQLiteColdIndex.selectSegments(connection, "block", 0, null, 0, 0, null)) {
+                assertEquals(segment.getRowCount(), SQLiteColdIndex.readRows(connection, segment).size(), "every segment reads back whole");
+            }
             assertEquals(0, ColdRollupTask.repairRowIds(connection, () -> {
             }), "and no live row ended up underneath them");
         }

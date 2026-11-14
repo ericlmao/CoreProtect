@@ -1,7 +1,6 @@
 package net.coreprotect.api;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
@@ -48,48 +47,52 @@ public class InventoryAPI {
                 return result;
             }
 
-            boolean snapshot = filter.beginDuckDBSnapshot(connection);
             try {
-                StringBuilder whereBuilder = new StringBuilder();
-                filter.appendWhere(whereBuilder);
-                StringBuilder blockWhereBuilder = new StringBuilder(whereBuilder);
-                filter.appendMaterialWhere(blockWhereBuilder, "", true);
-                filter.appendMaterialWhere(whereBuilder);
-                String where = whereBuilder.toString();
-                StringBuilder entityWhereBuilder = new StringBuilder();
-                filter.appendEntityContainerWhere(entityWhereBuilder, "entity_rows", "spawn_rows");
-                filter.appendMaterialWhere(entityWhereBuilder, "entity_rows");
-                String query = buildQuery(
-                        blockWhereBuilder.toString(),
-                        where,
-                        entityWhereBuilder.toString(),
-                        options.getInventoryActions(),
-                        options.hasLimit(),
-                        filter.table(connection, "block", ""),
-                        filter.table(connection, "container", ""),
-                        filter.entityContainerTable(connection, "entity_rows"),
-                        filter.table(connection, "item", "")
-                );
+                boolean snapshot = filter.beginDuckDBSnapshot(connection);
+                try {
+                    List<InventoryAction> actions = options.getInventoryActions();
+                    StringBuilder whereBuilder = new StringBuilder(filter.where(""));
+                    StringBuilder blockWhereBuilder = new StringBuilder(whereBuilder);
+                    filter.appendMaterialWhere(blockWhereBuilder, "", true);
+                    blockWhereBuilder.append(" AND action = 1");
+                    appendActionWhere(blockWhereBuilder, "", actions, InventorySources.BLOCK);
+                    filter.appendMaterialWhere(whereBuilder);
+                    StringBuilder containerWhereBuilder = new StringBuilder(whereBuilder);
+                    appendActionWhere(containerWhereBuilder, "", actions, InventorySources.CONTAINER);
+                    StringBuilder itemWhereBuilder = new StringBuilder(whereBuilder);
+                    appendActionWhere(itemWhereBuilder, "", actions, InventorySources.ITEM);
+                    StringBuilder entityWhereBuilder = new StringBuilder(filter.entityContainerWhere("entity_rows", "spawn_rows"));
+                    filter.appendMaterialWhere(entityWhereBuilder, "entity_rows");
+                    appendActionWhere(entityWhereBuilder, "entity_rows", actions, InventorySources.CONTAINER);
 
-                try (PreparedStatement statement = connection.prepareStatement(query)) {
-                    int parameterIndex = filter.bind(statement);
-                    parameterIndex = filter.bind(statement, parameterIndex);
-                    parameterIndex = filter.bindEntityContainer(statement, parameterIndex);
-                    parameterIndex = filter.bind(statement, parameterIndex);
-                    if (options.hasLimit()) {
-                        statement.setInt(parameterIndex++, options.getLimitCount());
-                        statement.setInt(parameterIndex, options.getLimitOffset());
-                    }
+                    String blockWhere = blockWhereBuilder.toString();
+                    String containerWhere = containerWhereBuilder.toString();
+                    String entityWhere = entityWhereBuilder.toString();
+                    String itemWhere = itemWhereBuilder.toString();
+                    String query = buildQuery(
+                            blockWhere,
+                            containerWhere,
+                            entityWhere,
+                            itemWhere,
+                            filter.table(connection, "block", "", blockWhere, InventorySources.BLOCK),
+                            filter.table(connection, "container", "", containerWhere, InventorySources.CONTAINER),
+                            filter.entityContainerTable(connection, "entity_rows", entityWhere, InventorySources.ENTITY_CONTAINER),
+                            filter.table(connection, "item", "", itemWhere, InventorySources.ITEM)
+                    );
 
-                    try (ResultSet results = statement.executeQuery()) {
-                        while (results.next()) {
-                            result.add(parseInventoryResult(connection, results));
-                        }
-                    }
+                    filter.read(connection, query, " ORDER BY time DESC, source DESC, id DESC", statement -> {
+                        int parameterIndex = filter.bind(statement);
+                        parameterIndex = filter.bind(statement, parameterIndex);
+                        parameterIndex = filter.bindEntityContainer(statement, parameterIndex);
+                        return filter.bind(statement, parameterIndex);
+                    }, results -> result.add(parseInventoryResult(connection, results)));
+                }
+                finally {
+                    filter.endDuckDBSnapshot(connection, snapshot);
                 }
             }
             finally {
-                filter.endDuckDBSnapshot(connection, snapshot);
+                filter.close();
             }
         }
         catch (Exception e) {
@@ -99,41 +102,46 @@ public class InventoryAPI {
         return result;
     }
 
-    private static String buildQuery(String blockWhere, String where, String entityWhere, List<InventoryAction> actions, boolean hasLimit, String blockTable, String containerTable, String entityContainerTable, String itemTable) {
+    /**
+     * @return the lookup without its order or limit, which {@link LookupFilter#read} adds
+     */
+    private static String buildQuery(String blockWhere, String containerWhere, String entityWhere, String itemWhere, String blockTable, String containerTable, String entityContainerTable, String itemTable) {
         StringBuilder query = new StringBuilder("SELECT * FROM (");
         query.append("SELECT 0 AS source,rowid AS id,time,").append(ConfigHandler.databaseType.getUserColumn()).append(",wid,x,y,z,type,data,1 AS amount,meta AS metadata,action,rolled_back FROM ")
-                .append(blockTable).append(' ').append(blockWhere).append(" AND action = 1");
+                .append(blockTable).append(" WHERE ").append(blockWhere);
         query.append(" UNION ALL ");
         query.append("SELECT 1 AS source,rowid AS id,time,").append(ConfigHandler.databaseType.getUserColumn()).append(",wid,x,y,z,type,data,amount,metadata,action,rolled_back FROM ")
-                .append(containerTable).append(' ').append(where);
+                .append(containerTable).append(" WHERE ").append(containerWhere);
         query.append(" UNION ALL ");
         query.append("SELECT ").append(InventorySources.ENTITY_CONTAINER).append(" AS source,entity_rows.rowid AS id,entity_rows.time,entity_rows.").append(ConfigHandler.databaseType.getUserColumn()).append(",spawn_rows.current_wid AS wid,spawn_rows.x,spawn_rows.y,spawn_rows.z,entity_rows.type,entity_rows.data,entity_rows.amount,entity_rows.metadata,entity_rows.action,entity_rows.rolled_back FROM ")
-                .append(entityContainerTable).append(" JOIN ").append(ConfigHandler.prefix).append("entity_spawn spawn_rows ON spawn_rows.rowid=entity_rows.entity_spawn_rowid ").append(entityWhere);
+                .append(entityContainerTable).append(" JOIN ").append(ConfigHandler.prefix).append("entity_spawn spawn_rows ON spawn_rows.rowid=entity_rows.entity_spawn_rowid WHERE ").append(entityWhere);
         query.append(" UNION ALL ");
         query.append("SELECT 2 AS source,rowid AS id,time,").append(ConfigHandler.databaseType.getUserColumn()).append(",wid,x,y,z,type,0 AS data,amount,data AS metadata,action,rolled_back FROM ")
-                .append(itemTable).append(' ').append(where);
+                .append(itemTable).append(" WHERE ").append(itemWhere);
         query.append(") AS inventory_lookup");
-        appendActionWhere(query, actions);
-        query.append(" ORDER BY time DESC, source DESC, id DESC");
-        if (hasLimit) {
-            query.append(" LIMIT ? OFFSET ?");
-        }
-
         return query.toString();
     }
 
-    private static void appendActionWhere(StringBuilder query, List<InventoryAction> actions) {
-        if (!actions.isEmpty()) {
-            StringJoiner predicates = new StringJoiner(" OR ");
-            for (InventoryAction action : actions) {
-                String sources = String.valueOf(action.sourceId());
-                if (action.sourceId() == InventorySources.CONTAINER) {
-                    sources += "," + InventorySources.ENTITY_CONTAINER;
-                }
-                predicates.add("(source IN (" + sources + ") AND action = " + action.id() + ")");
-            }
-            query.append(" WHERE (").append(predicates).append(")");
+    /**
+     * Restricts one source of the lookup to the actions asked of it. The restriction is part of each
+     * source's own clause, rather than applied to the merged rows, so that on SQLite the reader of
+     * packed rows knows exactly which rows each source keeps.
+     *
+     * @param source
+     *            the source the clause is for; entity containers count as containers
+     */
+    private static void appendActionWhere(StringBuilder query, String alias, List<InventoryAction> actions, int source) {
+        if (actions.isEmpty()) {
+            return;
         }
+        StringJoiner ids = new StringJoiner(",");
+        for (InventoryAction action : actions) {
+            if (action.sourceId() == source) {
+                ids.add(String.valueOf(action.id()));
+            }
+        }
+        // No action has the id -1, so a source none of the actions belong to keeps no rows.
+        query.append(" AND ").append(alias.isEmpty() ? "" : alias + ".").append("action IN (").append(ids.length() > 0 ? ids.toString() : "-1").append(")");
     }
 
     private static InventoryResult parseInventoryResult(Connection connection, ResultSet results) throws Exception {

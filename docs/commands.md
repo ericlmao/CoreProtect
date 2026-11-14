@@ -141,15 +141,15 @@ In CoreProtect v2.15+, adding `#optimize` to the end of the command (for example
 ___
 
 ### /co compact
-Pack activity that has aged out of the hot window into compressed storage, without waiting for the nightly run.
+Pack everything logged so far into compressed storage, including the part that has not filled a segment yet.
 
 | Command | Parameters |
 | --- | --- |
 | /co compact | |
 
-Unlike the nightly run, this ignores `hot-window` and packs everything logged so far, including data from today. It uses the same safeguards: rows are sealed oldest first, one transaction per segment, and the database is never duplicated. Stopping the server or starting a purge mid-run simply leaves the remaining rows to be packed later.
+Activity is normally packed on its own: as soon as a day has logged a full segment's worth of rows, and the rest of a day once it is over. This command also packs the remainder that is still filling up, and returns the freed pages to the file system. It uses the same safeguards: rows are sealed oldest first, one transaction per segment, and the database is never duplicated. Stopping the server or starting a purge mid-run simply leaves the remaining rows to be packed later.
 
-Compressed storage typically holds data at a small fraction of its live size, so a compact run frees most of the space the affected rows occupied. Data that is still inside the `hot-window` is left alone; if nothing is old enough, the command says so.
+It is rarely needed. It is useful after upgrading from a build that kept a window of recent history unpacked, to pack that history straight away rather than a segment at a time. If nothing is left to pack, the command says so.
 
 SQLite only. See the [storage layout guide](/storage-layout/). Requires the `coreprotect.purge` permission.
 ___

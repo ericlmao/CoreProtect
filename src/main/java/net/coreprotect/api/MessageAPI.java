@@ -1,7 +1,6 @@
 package net.coreprotect.api;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
@@ -56,30 +55,20 @@ public class MessageAPI {
                 return result;
             }
 
-            StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,message FROM ");
-            query.append(filter.table(connection, table, "")).append(' ');
-            if (filter.hasLocation() && !ConfigHandler.databaseType.isDuckDB()) {
-                query.append(WorldUtils.getWidIndex(table));
+            try {
+                List<String> messageBindings = new ArrayList<>();
+                String where = LookupRaw.appendMessageFilters(filter.where(""),
+                        options == null ? List.of() : options.getTextStartsWithAny(),
+                        options == null ? List.of() : options.getTextStartsWithNone(), table, messageBindings);
+                StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,message FROM ");
+                query.append(filter.table(connection, table, "", where, 0)).append(' ');
+                query.append(filter.index(table));
+                query.append("WHERE ").append(where);
+
+                filter.read(connection, query.toString(), " ORDER BY " + ConfigHandler.getDescendingEventOrder(), filter::bind, messageBindings, results -> result.add(parseMessageResult(connection, results, action.id())));
             }
-            filter.appendWhere(query);
-            List<String> messageBindings = new ArrayList<>();
-            query = new StringBuilder(LookupRaw.appendMessageFilters(query.toString(),
-                    options == null ? List.of() : options.getTextStartsWithAny(),
-                    options == null ? List.of() : options.getTextStartsWithNone(), table, messageBindings));
-            query.append(" ORDER BY ").append(ConfigHandler.getDescendingEventOrder());
-            filter.appendLimit(query);
-
-            try (PreparedStatement statement = connection.prepareStatement(query.toString())) {
-                int parameterIndex = filter.bind(statement);
-                for (String binding : messageBindings) {
-                    statement.setString(parameterIndex++, binding);
-                }
-
-                try (ResultSet results = statement.executeQuery()) {
-                    while (results.next()) {
-                        result.add(parseMessageResult(connection, results, action.id()));
-                    }
-                }
+            finally {
+                filter.close();
             }
         }
         catch (Exception e) {
