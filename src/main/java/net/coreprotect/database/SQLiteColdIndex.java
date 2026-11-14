@@ -200,11 +200,25 @@ public final class SQLiteColdIndex {
         final int typeColumn;
         final int actionColumn;
         final int spawnColumn;
+        /**
+         * The columns every segment of the table is read as, so a segment packed before a column was
+         * added shows it holding the column's default.
+         */
+        final ColdSegmentCodec.Columns decodeColumns;
 
         TableLayout(String[] columns, int[] types, String[] declaredTypes) {
+            this(columns, types, declaredTypes, new Object[columns.length]);
+        }
+
+        /**
+         * @param defaults
+         *            each column's default, as {@link ColdSegmentCodec.Columns} takes them
+         */
+        TableLayout(String[] columns, int[] types, String[] declaredTypes, Object[] defaults) {
             this.columns = columns;
             this.types = types;
             this.declaredTypes = declaredTypes;
+            this.decodeColumns = new ColdSegmentCodec.Columns(types, defaults);
             this.timeColumn = indexOf(columns, "time");
             this.worldColumn = indexOf(columns, "wid");
             this.xColumn = indexOf(columns, "x");
@@ -262,13 +276,16 @@ public final class SQLiteColdIndex {
         List<String> columns = new ArrayList<>();
         List<Integer> types = new ArrayList<>();
         List<String> declared = new ArrayList<>();
+        List<Object> defaults = new ArrayList<>();
         try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery("PRAGMA table_info(" + ConfigHandler.prefix + table + ")")) {
             while (results.next()) {
                 String name = results.getString("name");
                 String declaredType = results.getString("type");
+                int type = columnType(declaredType);
                 columns.add(name);
                 declared.add(declaredType == null || declaredType.isEmpty() ? "INTEGER" : declaredType);
-                types.add(columnType(declaredType));
+                types.add(type);
+                defaults.add(defaultValue(results.getString("dflt_value"), type));
             }
         }
 
@@ -283,9 +300,74 @@ public final class SQLiteColdIndex {
             typeArray[index] = types.get(index);
         }
 
-        TableLayout layout = new TableLayout(columns.toArray(new String[0]), typeArray, declared.toArray(new String[0]));
+        TableLayout layout = new TableLayout(columns.toArray(new String[0]), typeArray, declared.toArray(new String[0]), defaults.toArray());
         LAYOUTS.put(table, layout);
         return layout;
+    }
+
+    /**
+     * Forgets the layout read for a table, after a column has been added to it, so the next read
+     * sees the column.
+     *
+     * @param table
+     *            an unprefixed table name
+     */
+    static void forgetLayout(String table) {
+        LAYOUTS.remove(table);
+    }
+
+    /**
+     * The value a row that predates a column holds in it, as {@code PRAGMA table_info} reports the
+     * column's default.
+     *
+     * @param declaredDefault
+     *            the default as SQLite reports it, or null for none
+     * @param type
+     *            the column's kind
+     * @return null, a Long for an integer column, a Double for a real one, or
+     *         {@link ColdSegmentCodec.Columns#UNSUPPORTED_DEFAULT}
+     */
+    static Object defaultValue(String declaredDefault, int type) {
+        if (declaredDefault == null) {
+            return null;
+        }
+        String value = declaredDefault.trim();
+        while (value.length() >= 2 && value.startsWith("(") && value.endsWith(")")) {
+            value = value.substring(1, value.length() - 1).trim();
+        }
+        if (value.equalsIgnoreCase("NULL")) {
+            return null;
+        }
+        if (value.length() >= 2 && value.startsWith("'") && value.endsWith("'")) {
+            // A quoted number in a numeric column is stored as that number.
+            value = value.substring(1, value.length() - 1).trim();
+        }
+        try {
+            if (type == ColdSegmentCodec.TYPE_INTEGER) {
+                return Long.valueOf(value);
+            }
+            if (type == ColdSegmentCodec.TYPE_REAL) {
+                return Double.valueOf(value);
+            }
+        }
+        catch (NumberFormatException unsupported) {
+            // Falls through: the default is not a plain number.
+        }
+        return ColdSegmentCodec.Columns.UNSUPPORTED_DEFAULT;
+    }
+
+    /**
+     * @return the columns a segment's rows are read as, or null when its table is not in this
+     *         database, in which case the segment is read with the columns it was packed with
+     */
+    private static ColdSegmentCodec.Columns decodeColumns(Connection connection, ColdSegment segment) throws SQLException {
+        for (Map.Entry<String, Integer> entry : SEGMENTED_TABLES.entrySet()) {
+            if (entry.getValue() == segment.tableId) {
+                TableLayout layout = layout(connection, entry.getKey());
+                return layout == null ? null : layout.decodeColumns;
+            }
+        }
+        return null;
     }
 
     private static int columnType(String declaredType) {
@@ -1732,7 +1814,7 @@ public final class SQLiteColdIndex {
             for (SegmentFrames read : readBatch(connection, batch, filter)) {
                 counting.add(() -> {
                     ColdSegmentReadCounter.recordRead();
-                    return ColdSegmentCodec.count(read.scalars(), read.units, filter);
+                    return ColdSegmentCodec.count(read.scalars(), read.units, filter, read.columns);
                 });
             }
             List<Integer> counted = runAll(counting);
@@ -1761,7 +1843,7 @@ public final class SQLiteColdIndex {
             for (SegmentFrames read : readBatch(connection, batch, filter)) {
                 scanning.add(() -> {
                     ColdSegmentReadCounter.recordRead();
-                    return ColdSegmentCodec.keys(read.scalars(), read.units, filter, timeColumn);
+                    return ColdSegmentCodec.keys(read.scalars(), read.units, filter, timeColumn, read.columns);
                 });
             }
             for (ColdSegmentCodec.KeyRows keys : runAll(scanning)) {
@@ -3096,7 +3178,7 @@ public final class SQLiteColdIndex {
         for (SegmentFrames read : readBatch(connection, batch, filter)) {
             counting.add(() -> {
                 ColdSegmentReadCounter.recordRead();
-                return ColdSegmentCodec.count(read.scalars(), read.units, filter);
+                return ColdSegmentCodec.count(read.scalars(), read.units, filter, read.columns);
             });
         }
         long counted = 0;
@@ -3135,7 +3217,7 @@ public final class SQLiteColdIndex {
         for (SegmentFrames read : frames) {
             selecting.add(() -> {
                 ColdSegmentReadCounter.recordRead();
-                return ColdSegmentCodec.select(read.scalars(), read.units, filter);
+                return ColdSegmentCodec.select(read.scalars(), read.units, filter, read.columns);
             });
         }
         List<ColdSegmentCodec.Selection> selections = runAll(selecting);
@@ -3402,15 +3484,18 @@ public final class SQLiteColdIndex {
     private static final class SegmentFrames {
         private final ColdSegment segment;
         private final SegmentFrameCache.Entry entry;
+        /** The columns the segment's rows are read as. */
+        private final ColdSegmentCodec.Columns columns;
         /**
          * The unit bodies this read needs, by unit number, when the segment stores them apart from
          * its directory; null otherwise.
          */
         private byte[][] units;
 
-        private SegmentFrames(ColdSegment segment, SegmentFrameCache.Entry entry) {
+        private SegmentFrames(ColdSegment segment, SegmentFrameCache.Entry entry, ColdSegmentCodec.Columns columns) {
             this.segment = segment;
             this.entry = entry;
+            this.columns = columns;
         }
 
         private byte[] scalars() throws SQLException {
@@ -3451,7 +3536,7 @@ public final class SQLiteColdIndex {
                 }
             }
         }
-        return new SegmentFrames(segment, entry);
+        return new SegmentFrames(segment, entry, decodeColumns(connection, segment));
     }
 
     /**
@@ -3551,7 +3636,7 @@ public final class SQLiteColdIndex {
         byte[] directory = entry.scalars();
         int[] needed;
         try {
-            needed = ColdSegmentCodec.neededUnits(directory, filter);
+            needed = ColdSegmentCodec.neededUnits(directory, filter, frames.columns);
         }
         catch (IllegalArgumentException malformed) {
             throw new SQLException("Cold segment " + segment.id + " has an unreadable directory", malformed);
@@ -3693,7 +3778,7 @@ public final class SQLiteColdIndex {
                 // A segment's units are written in the same transaction as its row and never change
                 // afterwards, so a second statement finds exactly the ones this directory describes.
                 byte[][] units = ColdSegmentCodec.isSplit(scalars) ? readAllUnits(connection, segment.id, scalars) : null;
-                return ColdSegmentCodec.decode(scalars, units, payload, filter);
+                return ColdSegmentCodec.decode(scalars, units, payload, filter, decodeColumns(connection, segment));
             }
         }
     }
@@ -3773,7 +3858,7 @@ public final class SQLiteColdIndex {
                 }
                 byte[] scalars = SegmentDictionary.decompress(results.getBytes("scalars"), results.getInt("scalars_size"), 0, connection);
                 byte[][] units = ColdSegmentCodec.isSplit(scalars) ? readAllUnits(connection, segment.id, scalars) : null;
-                ColdSegmentCodec.count(scalars, units, filter);
+                ColdSegmentCodec.count(scalars, units, filter, decodeColumns(connection, segment));
             }
         }
     }

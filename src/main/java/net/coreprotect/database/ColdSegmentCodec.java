@@ -226,6 +226,56 @@ public final class ColdSegmentCodec {
     }
 
     /**
+     * The columns a table has now, for reading segments packed before some of them were added.
+     *
+     * <p>
+     * A segment records the columns its table had when it was packed, and a column added to the
+     * table since then, which SQLite always appends, is missing from it. Read against the table's
+     * columns, such a segment shows each missing column holding the table's default for it, which
+     * is the value SQLite gives every row that was already in the table when the column was added.
+     * Filters, ranges and decoded rows then all see the table's columns, whichever build packed the
+     * segment. Nothing stored changes.
+     * </p>
+     */
+    public static final class Columns {
+        /** Stands for a default the codec cannot show, such as a text value or an expression. */
+        public static final Object UNSUPPORTED_DEFAULT = new Object();
+
+        private final int[] types;
+        private final Object[] defaults;
+
+        /**
+         * @param types
+         *            the column kind of each of the table's columns
+         * @param defaults
+         *            each column's default: null, a {@link Long} for an integer column, a
+         *            {@link Double} for a real one, or {@link #UNSUPPORTED_DEFAULT}
+         */
+        public Columns(int[] types, Object[] defaults) {
+            if (types.length != defaults.length) {
+                throw new IllegalArgumentException("Every column has one default");
+            }
+            for (int column = 0; column < types.length; column++) {
+                Object value = defaults[column];
+                boolean valid = value == null || value == UNSUPPORTED_DEFAULT || (types[column] == TYPE_INTEGER && value instanceof Long)
+                        || (types[column] == TYPE_REAL && value instanceof Double);
+                if (!valid) {
+                    throw new IllegalArgumentException("Column " + column + " has a default of the wrong kind");
+                }
+            }
+            this.types = types.clone();
+            this.defaults = defaults.clone();
+        }
+
+        /**
+         * @return how many columns the table has
+         */
+        public int size() {
+            return types.length;
+        }
+    }
+
+    /**
      * Decides, from the scalar values of a row, whether the row is worth building.
      *
      * <p>
@@ -1293,7 +1343,19 @@ public final class ColdSegmentCodec {
      * @return the decoded rows
      */
     public static Rows decode(byte[] scalars, byte[][] units, byte[] payload, RowFilter filter) {
-        return select(scalars, units, filter).build(payload == null ? new byte[0] : payload);
+        return decode(scalars, units, payload, filter, null);
+    }
+
+    /**
+     * Decodes a segment as {@link #decode(byte[], byte[][], byte[], RowFilter)} does, showing it with
+     * the columns its table has now.
+     *
+     * @param columns
+     *            the table's columns, which a segment packed before some were added is read as, or
+     *            null to read the segment with the columns it was packed with
+     */
+    public static Rows decode(byte[] scalars, byte[][] units, byte[] payload, RowFilter filter, Columns columns) {
+        return select(scalars, units, filter, columns).build(payload == null ? new byte[0] : payload);
     }
 
     /**
@@ -1359,7 +1421,18 @@ public final class ColdSegmentCodec {
      * @return the kept rows, waiting for their text and blob values
      */
     public static Selection select(byte[] scalars, byte[][] units, RowFilter filter) {
-        return collect(scalars, units, filter, false, null).selection();
+        return select(scalars, units, filter, null);
+    }
+
+    /**
+     * Selects rows as {@link #select(byte[], byte[][], RowFilter)} does, showing the segment with
+     * the columns its table has now.
+     *
+     * @param columns
+     *            the table's columns, or null to read the segment with the columns it was packed with
+     */
+    public static Selection select(byte[] scalars, byte[][] units, RowFilter filter, Columns columns) {
+        return collect(scalars, units, filter, false, null, columns).selection();
     }
 
     /**
@@ -1404,7 +1477,18 @@ public final class ColdSegmentCodec {
      * @return the number of accepted rows
      */
     public static int count(byte[] scalars, byte[][] units, RowFilter filter) {
-        return collect(scalars, units, filter, true, null).size;
+        return count(scalars, units, filter, null);
+    }
+
+    /**
+     * Counts rows as {@link #count(byte[], byte[][], RowFilter)} does, showing the filter the segment
+     * with the columns its table has now.
+     *
+     * @param columns
+     *            the table's columns, or null to read the segment with the columns it was packed with
+     */
+    public static int count(byte[] scalars, byte[][] units, RowFilter filter, Columns columns) {
+        return collect(scalars, units, filter, true, null, columns).size;
     }
 
     /**
@@ -1467,8 +1551,19 @@ public final class ColdSegmentCodec {
      * @return the ids and times of the accepted rows, in the order they are stored
      */
     public static KeyRows keys(byte[] scalars, byte[][] units, RowFilter filter, int timeColumn) {
+        return keys(scalars, units, filter, timeColumn, null);
+    }
+
+    /**
+     * Collects ids and times as {@link #keys(byte[], byte[][], RowFilter, int)} does, showing the
+     * filter the segment with the columns its table has now.
+     *
+     * @param columns
+     *            the table's columns, or null to read the segment with the columns it was packed with
+     */
+    public static KeyRows keys(byte[] scalars, byte[][] units, RowFilter filter, int timeColumn, Columns columns) {
         KeyRows keys = new KeyRows(timeColumn);
-        collect(scalars, units, filter, true, keys);
+        collect(scalars, units, filter, true, keys, columns);
         return keys;
     }
 
@@ -1535,7 +1630,19 @@ public final class ColdSegmentCodec {
      * @return the numbers of the needed units, in ascending order
      */
     public static int[] neededUnits(byte[] scalars, RowFilter filter) {
+        return neededUnits(scalars, filter, null);
+    }
+
+    /**
+     * Works out the needed units as {@link #neededUnits(byte[], RowFilter)} does, testing the
+     * segment's groups with the columns its table has now.
+     *
+     * @param columns
+     *            the table's columns, or null to read the segment with the columns it was packed with
+     */
+    public static int[] neededUnits(byte[] scalars, RowFilter filter, Columns columns) {
         Directory directory = readDirectory(scalars);
+        directory.widen(columns);
         if (directory.version == VERSION_ONE) {
             throw new IllegalArgumentException("A segment of the first format has no units");
         }
@@ -1553,14 +1660,15 @@ public final class ColdSegmentCodec {
         return Arrays.copyOf(needed, count);
     }
 
-    private static Collector collect(byte[] scalars, byte[][] units, RowFilter filter, boolean countOnly, KeyRows keys) {
+    private static Collector collect(byte[] scalars, byte[][] units, RowFilter filter, boolean countOnly, KeyRows keys, Columns columns) {
         Scratch scratch = borrowScratch();
         try {
             Directory directory = readDirectory(scalars);
-            Collector collector = new Collector(directory.types.length, directory.types, countOnly);
+            directory.widen(columns);
+            Collector collector = new Collector(directory.width, directory.shownTypes, countOnly);
             collector.keys = keys;
             if (directory.version == VERSION_ONE) {
-                decodeVersionOne(scalars, directory.end, directory.types, directory.rowCount, filter, collector, scratch);
+                decodeVersionOne(scalars, directory, filter, collector, scratch);
             }
             else if (directory.version == VERSION_SPLIT) {
                 if (directory.end != scalars.length) {
@@ -1604,6 +1712,89 @@ public final class ColdSegmentCodec {
         private ChunkList[] chunks;
         /** Where the directory ends: where the first body begins in a frame with its bodies in line. */
         private int end;
+        /**
+         * How many columns the segment is shown with: the columns it was packed with, or more when it
+         * is read against a table that has gained columns since.
+         */
+        private int width;
+        /** The kind of each column the segment is shown with; the stored kinds, then any appended. */
+        private int[] shownTypes;
+        /** The plain number every row shows in each appended column, by column. */
+        private long[] appendedNumbers;
+        /** Whether every row holds a value in each appended column, by column. */
+        private boolean[] appendedPresent;
+
+        /**
+         * Shows the segment with the columns its table has now. Every column the segment lacks is
+         * appended holding the table's default for it, in every row, and each group's ranges say so,
+         * so a filter about such a column judges the groups of an old segment just as it judges the
+         * rows in them.
+         *
+         * @param columns
+         *            the table's columns, or null to keep the columns the segment was packed with
+         * @throws IllegalArgumentException
+         *             if the segment's columns are not where the table has them, or a column it lacks
+         *             has a default that cannot be shown
+         */
+        private void widen(Columns columns) {
+            int stored = types.length;
+            width = stored;
+            shownTypes = types;
+            if (columns == null || columns.size() <= stored) {
+                return;
+            }
+            for (int column = 0; column < stored; column++) {
+                if (columns.types[column] != types[column]) {
+                    throw new IllegalArgumentException("Segment column " + column + " is not of the kind its table has there");
+                }
+            }
+            int shown = columns.size();
+            long[] numbers = new long[shown];
+            boolean[] present = new boolean[shown];
+            for (int column = stored; column < shown; column++) {
+                Object value = columns.defaults[column];
+                if (value == Columns.UNSUPPORTED_DEFAULT) {
+                    throw new IllegalArgumentException("Segment predates column " + column + ", whose default cannot be shown");
+                }
+                present[column] = value != null;
+                if (value instanceof Long) {
+                    numbers[column] = (Long) value;
+                }
+                else if (value instanceof Double) {
+                    numbers[column] = Double.doubleToLongBits((Double) value);
+                }
+            }
+            if (version != VERSION_ONE) {
+                for (int group = 0; group < groupCount; group++) {
+                    minimum[group] = Arrays.copyOf(minimum[group], shown);
+                    maximum[group] = Arrays.copyOf(maximum[group], shown);
+                    known[group] = Arrays.copyOf(known[group], shown);
+                    for (int column = stored; column < shown; column++) {
+                        // A range is only ever known for an integer column with a value in every row.
+                        if (present[column] && columns.types[column] == TYPE_INTEGER) {
+                            known[group][column] = true;
+                            minimum[group][column] = numbers[column];
+                            maximum[group][column] = numbers[column];
+                        }
+                    }
+                }
+            }
+            width = shown;
+            shownTypes = columns.types;
+            appendedNumbers = numbers;
+            appendedPresent = present;
+        }
+
+        /**
+         * Fills the appended columns of freshly decoded rows with the table's defaults.
+         */
+        private void fillAppended(Scratch scratch, int rowCount) {
+            for (int column = types.length; column < width; column++) {
+                Arrays.fill(scratch.present[column], 0, rowCount, appendedPresent[column]);
+                Arrays.fill(scratch.planes[column], 0, rowCount, appendedNumbers[column]);
+                Arrays.fill(scratch.lengths[column], 0, rowCount, 0);
+            }
+        }
 
         /**
          * @return false only if no row of the group can pass the filter. The chunks are asked
@@ -1640,6 +1831,8 @@ public final class ColdSegmentCodec {
                 types[column] = input.read();
             }
             directory.types = types;
+            directory.width = columnCount;
+            directory.shownTypes = types;
             directory.rowCount = (int) input.readVarUnsigned();
             if (version != VERSION_ONE) {
                 readGroups(input, directory, version >= VERSION_CHUNKS);
@@ -1652,12 +1845,14 @@ public final class ColdSegmentCodec {
         }
     }
 
-    private static void decodeVersionOne(byte[] data, int position, int[] types, int rowCount, RowFilter filter, Collector collector, Scratch pooled) {
-        Scratch scratch = pooled.prepare(types.length, rowCount);
-        int end = decodeBody(data, position, types, rowCount, 0, scratch);
+    private static void decodeVersionOne(byte[] data, Directory directory, RowFilter filter, Collector collector, Scratch pooled) {
+        int rowCount = directory.rowCount;
+        Scratch scratch = pooled.prepare(directory.width, rowCount);
+        int end = decodeBody(data, directory.end, directory.types, rowCount, 0, scratch);
         if (end != data.length) {
             throw new IllegalArgumentException("Segment frame has " + (data.length - end) + " unread bytes");
         }
+        directory.fillAppended(scratch, rowCount);
         collector.collect(scratch, rowCount, filter);
     }
 
@@ -1819,8 +2014,9 @@ public final class ColdSegmentCodec {
                     starts[chunk] = bodyStart + chunkStarts[group - firstGroup][chunk];
                 }
                 int rows = directory.groupRows[group];
-                Scratch scratch = pooled.prepare(columnCount, rows);
+                Scratch scratch = pooled.prepare(directory.width, rows);
                 decodeChunks(body, starts, chunkLengths[group], directory.types, rows, directory.payloadStarts[group], scratch);
+                directory.fillAppended(scratch, rows);
                 collector.collect(scratch, rows, filter);
             }
             unitOffset = unitOffset + stored;
@@ -1958,7 +2154,19 @@ public final class ColdSegmentCodec {
          *            a directory whose unit bodies are stored apart
          */
         GroupReader(byte[] scalars) {
+            this(scalars, null);
+        }
+
+        /**
+         * @param scalars
+         *            a directory whose unit bodies are stored apart
+         * @param columns
+         *            the columns the segment's table has now, which its rows are shown with, or null
+         *            for the columns it was packed with
+         */
+        GroupReader(byte[] scalars, Columns columns) {
             this.directory = readDirectory(scalars);
+            directory.widen(columns);
             if (directory.version != VERSION_SPLIT) {
                 throw new IllegalArgumentException("Only a segment whose units are stored apart can be read a group at a time, not version " + directory.version);
             }
@@ -1985,7 +2193,7 @@ public final class ColdSegmentCodec {
         }
 
         int columnCount() {
-            return directory.types.length;
+            return directory.width;
         }
 
         int firstGroup(int unit) {
@@ -2067,6 +2275,8 @@ public final class ColdSegmentCodec {
          */
         int decodeGroup(int group, byte[] body, byte[] payload, int payloadOffset, long[] rowIds, Object[][] rows) {
             int columnCount = directory.types.length;
+            int width = directory.width;
+            int[] shownTypes = directory.shownTypes;
             int unit = group / directory.unitGroups;
             int firstGroup = firstGroup(unit);
             int lastGroup = endGroup(unit);
@@ -2088,16 +2298,17 @@ public final class ColdSegmentCodec {
             int count = directory.groupRows[group];
             Scratch scratch = borrowScratch();
             try {
-                scratch.prepare(columnCount, count);
+                scratch.prepare(width, count);
                 decodeChunks(body, starts, chunkLengths[group], directory.types, count, directory.payloadStarts[group], scratch);
+                directory.fillAppended(scratch, count);
                 for (int row = 0; row < count; row++) {
                     rowIds[row] = scratch.rowIds[row];
-                    Object[] built = new Object[columnCount];
-                    for (int column = 0; column < columnCount; column++) {
+                    Object[] built = new Object[width];
+                    for (int column = 0; column < width; column++) {
                         if (!scratch.present[column][row]) {
                             continue;
                         }
-                        int type = directory.types[column];
+                        int type = shownTypes[column];
                         if (type == TYPE_INTEGER) {
                             built[column] = Long.valueOf(scratch.planes[column][row]);
                         }

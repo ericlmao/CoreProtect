@@ -476,7 +476,7 @@ public final class SegmentCompactor {
         try {
             PriorityQueue<StreamCursor> queue = new PriorityQueue<>((first, second) -> ColdRollupTask.LookupOrder.compare(first.key, second.key));
             for (Stream stream : chosen) {
-                StreamCursor cursor = new StreamCursor(connection, order, stream.segments);
+                StreamCursor cursor = new StreamCursor(connection, order, layout.decodeColumns, stream.segments);
                 cursors.add(cursor);
                 if (cursor.next()) {
                     queue.add(cursor);
@@ -710,6 +710,8 @@ public final class SegmentCompactor {
     private static final class StreamCursor implements AutoCloseable {
         private final Connection connection;
         private final ColdRollupTask.LookupOrder order;
+        /** The columns the table has now, which segments packed before one was added are read as. */
+        private final ColdSegmentCodec.Columns columns;
         private final List<Stored> segments;
         private final long[] rowIds = new long[ColdSegmentCodec.GROUP_ROWS];
         private final Object[][] rows = new Object[ColdSegmentCodec.GROUP_ROWS][];
@@ -732,9 +734,10 @@ public final class SegmentCompactor {
         private int untaken;
         private long segmentRows;
 
-        private StreamCursor(Connection connection, ColdRollupTask.LookupOrder order, List<Stored> segments) {
+        private StreamCursor(Connection connection, ColdRollupTask.LookupOrder order, ColdSegmentCodec.Columns columns, List<Stored> segments) {
             this.connection = connection;
             this.order = order;
+            this.columns = columns;
             this.segments = segments;
             this.key = new long[order.keyLength()];
         }
@@ -816,7 +819,7 @@ public final class SegmentCompactor {
                         throw new SQLException("Segment " + next.id + " went missing while it was being compacted");
                     }
                     try {
-                        reader = new ColdSegmentCodec.GroupReader(results.getBytes("scalars"));
+                        reader = new ColdSegmentCodec.GroupReader(results.getBytes("scalars"), columns);
                     }
                     catch (IllegalArgumentException malformed) {
                         throw new SQLException("Segment " + next.id + " cannot be read for compaction", malformed);

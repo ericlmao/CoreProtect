@@ -1280,6 +1280,7 @@ public class Database extends Queue {
             }
             try (Statement statement = connection.createStatement()) {
                 createMySQLTableStructures(prefix, statement);
+                SchemaUpgrade.ensureColumns(statement, prefix, DatabaseType.MYSQL);
                 createMySQLIndexes(prefix, statement, purge);
                 if (!purge && forceConnection == null) {
                     initializeTables(prefix, statement, DatabaseType.MYSQL);
@@ -1514,6 +1515,10 @@ public class Database extends Queue {
                 boolean createCommandMessagePrefixIndex = !tableData.contains(tablePrefix + "command");
                 boolean createSignMessagePrefixIndexes = !tableData.contains(tablePrefix + "sign");
                 createSQLiteTableStructures(prefix, statement, tableData);
+                if (!purge) {
+                    // A purge builds fresh tables in an attached file, which have every column.
+                    SchemaUpgrade.ensureColumns(statement, prefix, DatabaseType.SQLITE);
+                }
                 createSQLiteIndexes(tablePrefix, statement, indexData, attachDatabase, purge, createChatMessagePrefixIndex, createCommandMessagePrefixIndex, createSignMessagePrefixIndexes);
 
                 if (!purge && forceConnection == null) {
