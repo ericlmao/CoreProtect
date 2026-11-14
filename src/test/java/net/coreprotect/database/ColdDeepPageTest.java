@@ -313,6 +313,7 @@ class ColdDeepPageTest {
         }
         LookupSummaryPage expected;
         long expectedGroups;
+        long expectedRecords;
         SQLiteColdIndex.invalidate();
         try (Connection plainConnection = DriverManager.getConnection("jdbc:sqlite:" + plain)) {
             try (Statement statement = plainConnection.createStatement()) {
@@ -321,12 +322,13 @@ class ColdDeepPageTest {
             SQLiteColdIndex.reload(plainConnection);
             expected = summary(plainConnection);
             expectedGroups = summaryGroups(plainConnection);
+            expectedRecords = summaryRecords(plainConnection);
         }
         finally {
             SQLiteColdIndex.invalidate();
             SQLiteColdIndex.reload(connection);
         }
-        assertTrue(expected.getRecordRows() > 400_000, "the summary covers the whole history, " + expected.getRecordRows() + " rows");
+        assertTrue(expectedRecords > 400_000, "the summary covers the whole history, " + expectedRecords + " rows");
 
         long limit = 50_000;
         SQLiteColdIndex.setMaterializeLimitForTesting(limit);
@@ -334,6 +336,7 @@ class ColdDeepPageTest {
         LookupSummaryPage actual = summary(connection);
         assertEquals(describe(expected), describe(actual), "the summary of the packed history");
         assertEquals(expectedGroups, summaryGroups(connection), "the number of summarised groups");
+        assertEquals(expectedRecords, summaryRecords(connection), "the number of summarised records");
         assertTrue(ColdSegmentReadCounter.peakHeldRows() <= limit, "a window of the summary held " + ColdSegmentReadCounter.peakHeldRows() + " rows");
         assertTrue(ColdSegmentReadCounter.peakHeldRows() > 0, "the summary read packed rows");
     }
@@ -354,9 +357,17 @@ class ColdDeepPageTest {
         }
     }
 
+    private static long summaryRecords(Connection target) throws Exception {
+        try (Statement statement = target.createStatement()) {
+            return Lookup.countLookupRows(statement, console, Collections.emptyList(), Collections.singletonList("deeptester"), new ArrayList<>(), new HashMap<>(), Collections.emptyList(),
+                    new ArrayList<>(), EntityActionFilter.NONE, Collections.emptyList(), EntityLookupContext.legacy(Collections.emptySet(), Collections.emptySet()), null, null,
+                    new Long[] { 0L, 0L, 0L, 0L, 0L }, startTime, 0, false, true, null, LookupRollbackState.ANY);
+        }
+    }
+
     private static List<String> describe(LookupSummaryPage page) {
         List<String> described = new ArrayList<>();
-        described.add("groups=" + page.getTotalRows() + " records=" + page.getRecordRows());
+        described.add("groups=" + page.getTotalRows());
         for (LookupSummaryRow row : page.getRows()) {
             described.add(row.getUserId() + ":" + row.getMaterialId() + " removed " + row.getRemovedAmount() + " placed " + row.getPlacedAmount() + " net " + row.getAmount());
         }

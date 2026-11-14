@@ -426,8 +426,18 @@ public class Config extends Language {
         }
 
         configured = NON_DIGIT_PATTERN.matcher(configured).replaceAll("");
+        if (configured.isEmpty()) {
+            return dfl;
+        }
 
-        return configured.isEmpty() ? dfl : Integer.parseInt(configured);
+        // Only digits are left, so the one way parsing can fail is a value too large for an int.
+        // Clamp it rather than refusing to start over a single oversized setting.
+        try {
+            return Integer.parseInt(configured);
+        }
+        catch (NumberFormatException e) {
+            return Integer.MAX_VALUE;
+        }
     }
 
     /**

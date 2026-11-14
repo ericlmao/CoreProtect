@@ -1,9 +1,11 @@
 package net.coreprotect.config;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -59,5 +61,18 @@ class ConfigDatabaseSettingsTest {
         String written = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
         assertTrue(written.contains("database-type: mysql"));
         assertFalse(written.contains("database-type: duckdb"));
+    }
+
+    @Test
+    void readsAConfigFromTheSplitStorageBuildsWithoutFailing() throws IOException {
+        // Builds that kept a window of recent history unpacked wrote these keys; one server had a row
+        // limit too large for an int. The obsolete keys are ignored, and an oversized number in a
+        // setting that is still read is clamped instead of stopping the plugin from starting.
+        String legacy = "hot-window: 7d\ncold-max-rows: 5000000000\nhot-blob-compression-level: 4\nlookup-cache-mb: 99999999999\n";
+        Config config = new Config();
+
+        assertDoesNotThrow(() -> config.load(new ByteArrayInputStream(legacy.getBytes(StandardCharsets.UTF_8))));
+        assertEquals(4, config.LOG_BLOB_COMPRESSION_LEVEL);
+        assertEquals(Integer.MAX_VALUE, config.LOOKUP_CACHE_MB);
     }
 }
