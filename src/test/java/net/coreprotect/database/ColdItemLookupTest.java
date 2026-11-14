@@ -76,7 +76,7 @@ class ColdItemLookupTest {
         ConfigHandler.prefix = "co_";
         ConfigHandler.materials.put("minecraft:mace", MACE);
         ConfigHandler.playerIdCache.put("qwnks", USER_ID);
-        Config.getGlobal().COLD_DEBUG = true;
+        Config.getGlobal().STORAGE_DEBUG = true;
         SQLiteColdIndex.invalidate();
         SegmentDictionary.clearCache();
 
@@ -107,8 +107,7 @@ class ColdItemLookupTest {
         SQLiteColdIndex.invalidate();
         SegmentDictionary.clearCache();
         ConfigHandler.databaseType = previousType;
-        Config.getGlobal().COLD_DEBUG = false;
-        Config.getGlobal().COLD_MAX_ROWS = 0;
+        Config.getGlobal().STORAGE_DEBUG = false;
         if (connection != null) {
             connection.close();
         }
@@ -140,10 +139,9 @@ class ColdItemLookupTest {
     }
 
     @Test
-    void sparseMatchesUnderALowRowLimitStillShowEveryPage() throws Exception {
-        // Matches are rare enough that the newest segments hold none, and the limit on what one
-        // lookup may read is as low as it can be set.
-        Config.getGlobal().COLD_MAX_ROWS = 10000;
+    void sparseMatchesStillShowEveryPage() throws Exception {
+        // Matches are rare enough that the newest segments hold none, so each page has to read
+        // further back than it was planned to.
         insertItems(30, 20000, 10);
         compact();
         verifyLookup(Arrays.asList(LookupActions.ITEM, ItemTransactionActions.ADD), EntityActionFilter.NONE,

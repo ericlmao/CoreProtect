@@ -122,6 +122,13 @@ public class Lookup extends Queue {
             return 0L;
         }
         finally {
+            // A summary reads compressed storage like any lookup, and has to let go of it like one.
+            try {
+                SQLiteColdIndex.endLookup(statement == null ? null : statement.getConnection());
+            }
+            catch (Exception exception) {
+                ErrorReporter.report(exception);
+            }
             if (paused) {
                 Consumer.releaseOperationPause();
             }
@@ -156,6 +163,13 @@ public class Lookup extends Queue {
             ErrorReporter.report(e);
         }
         finally {
+            // A summary reads compressed storage like any lookup, and has to let go of it like one.
+            try {
+                SQLiteColdIndex.endLookup(statement == null ? null : statement.getConnection());
+            }
+            catch (Exception exception) {
+                ErrorReporter.report(exception);
+            }
             if (paused) {
                 Consumer.releaseOperationPause();
             }
@@ -195,6 +209,13 @@ public class Lookup extends Queue {
             ErrorReporter.report(e);
         }
         finally {
+            // A summary reads compressed storage like any lookup, and has to let go of it like one.
+            try {
+                SQLiteColdIndex.endLookup(statement == null ? null : statement.getConnection());
+            }
+            catch (Exception exception) {
+                ErrorReporter.report(exception);
+            }
             if (paused) {
                 Consumer.releaseOperationPause();
             }

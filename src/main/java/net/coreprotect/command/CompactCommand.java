@@ -16,6 +16,7 @@ import net.coreprotect.database.ColdStorageStats;
 import net.coreprotect.database.CompactProgress;
 import net.coreprotect.database.Database;
 import net.coreprotect.database.DatabaseRebuild;
+import net.coreprotect.database.SegmentCompactor;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
 import net.coreprotect.utility.Chat;
@@ -23,8 +24,9 @@ import net.coreprotect.utility.Color;
 import net.coreprotect.utility.ErrorReporter;
 
 /**
- * Packs activity that has aged out of the hot window into compressed storage on demand, instead of
- * waiting for the nightly run.
+ * Packs everything logged so far into compressed storage on demand. Packing normally happens on its
+ * own, as soon as a segment's worth of activity has been logged or the day it belongs to is over;
+ * this packs the unfinished remainder too.
  *
  * <p>
  * The work is the same as the automatic roll-up: rows are sealed into compressed segments oldest
@@ -132,8 +134,8 @@ public class CompactCommand {
                 return;
             }
 
-            // A manual compact packs everything that has already been written, rather than waiting
-            // for the hot window to expire.
+            // Packing normally waits until a segment's worth of rows has built up, or the day they
+            // belong to is over. A manual compact packs everything that has already been written.
             // Anything an earlier build left numbered underneath the segments is put back above them
             // first, or it can never be sealed.
             CompactProgress.set("reading compressed storage", 0, 0);
@@ -145,6 +147,13 @@ public class CompactCommand {
             // avoid opening segments that hold nothing for the player being searched for.
             CompactProgress.set("checking compressed storage", 0, 0);
             ColdRollupTask.backfillStatistics(connection, () -> tick(player));
+            // Segments written by older builds are rewritten in the current format, which is smaller
+            // and lets a lookup about one place decode a small part of each segment.
+            ColdRollupTask.repackOldSegments(connection, () -> tick(player), 0);
+            // Every day that is over is merged into a few segments ordered by place across the
+            // whole day, so a lookup about a place opens about one segment per day.
+            CompactProgress.set("compacting days that are over", 0, 0);
+            SegmentCompactor.compactAll(connection, () -> tick(player));
             // Entity data is read one row at a time and so never reaches a segment. It is compressed
             // where it lies instead, against a dictionary that supplies the repetition a single blob
             // of a couple of kilobytes does not contain.

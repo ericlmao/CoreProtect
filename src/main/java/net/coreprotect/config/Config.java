@@ -63,7 +63,7 @@ public class Config extends Language {
     public String AUTO_PURGE;
     public String AUTO_PURGE_TIME;
     public boolean BLOB_COMPRESSION;
-    public boolean COLD_DEBUG;
+    public boolean STORAGE_DEBUG;
     public boolean ENABLE_SSL;
     public boolean CLICKHOUSE_TLS;
     public boolean DISABLE_WAL;
@@ -122,11 +122,10 @@ public class Config extends Language {
     public int CLICKHOUSE_CONSUMER_DELAY;
     public int MYSQL_PORT;
     public int BLOB_COMPRESSION_LEVEL;
-    public int HOT_BLOB_COMPRESSION_LEVEL;
-    public int COLD_MAX_ROWS;
+    public int LOG_BLOB_COMPRESSION_LEVEL;
+    public int LOOKUP_CACHE_MB = -1;
     public int COMPACT_THREADS;
     public boolean COMPACT_REBUILD;
-    public long HOT_WINDOW_SECONDS;
     public int DEFAULT_RADIUS;
     public int DUCKDB_THREADS;
     public int MAX_RADIUS;
@@ -159,9 +158,8 @@ public class Config extends Language {
         DEFAULT_VALUES.put("duckdb-max-temp-directory-size", "10GB");
         DEFAULT_VALUES.put("blob-compression", "true");
         DEFAULT_VALUES.put("blob-compression-level", "19");
-        DEFAULT_VALUES.put("hot-blob-compression-level", "3");
-        DEFAULT_VALUES.put("hot-window", "7d");
-        DEFAULT_VALUES.put("cold-max-rows", "1000000");
+        DEFAULT_VALUES.put("log-blob-compression-level", "3");
+        DEFAULT_VALUES.put("lookup-cache-mb", "128");
         DEFAULT_VALUES.put("language", "en");
         DEFAULT_VALUES.put("auto-purge", "180d");
         DEFAULT_VALUES.put("auto-purge-time", "00:00");
@@ -213,10 +211,9 @@ public class Config extends Language {
         HEADERS.put("clickhouse-host", new String[] { "# Connection settings for ClickHouse 26.1 or newer.", "# The configured database must already exist; CoreProtect creates its prefixed tables and views.", "# Multiple writers require database-lock disabled, the same version and prefix, separate data directories, and direct connections to one physical server.", "# Keep writer clocks synchronized; a shared prefix is one logical namespace for worlds and players.", "# Do not reassign usernames, and record UUID-bearing logins before UUID-less activity under a changed name.", "# Stop every writer before migration or purge; purge requires database-lock on the remaining server.", "# Replicated, distributed, and load-balanced independent ClickHouse nodes are unsupported." });
         HEADERS.put("duckdb-memory-limit", new String[] { "# Resource limits for the embedded DuckDB database.", "# The memory limit controls DuckDB's buffer manager; the temporary limit caps spill data and is not preallocated." });
         HEADERS.put("blob-compression", new String[] { "# Compresses the item, block, and entity data stored in the database using Zstandard.", "# Compressed data lets the database retain far more history in the same amount of disk space.", "# Existing uncompressed data stays readable, so this can be enabled or disabled at any time.", "# Only used by SQLite and MySQL; DuckDB and ClickHouse compress their own storage." });
-        HEADERS.put("blob-compression-level", new String[] { "# Zstandard compression level, from 1 (fastest) to 22 (smallest), used when data is", "# rolled up into compressed storage." });
-        HEADERS.put("hot-window", new String[] { "# How much recent history stays in the fast, fully indexed tables.", "# Older data is packed into compressed storage, which is several times smaller but", "# slower to search. Examples: 3d, 7d, 30d. SQLite only." });
-        HEADERS.put("cold-max-rows", new String[] { "# A safety limit on how many rows a single lookup will read out of compressed storage.", "# Pages are normally planned so that only the rows around them are read, so this only", "# applies to searches that cannot be planned, such as those using exclusions or filters." });
-        HEADERS.put("hot-blob-compression-level", new String[] { "# Zstandard compression level used for freshly logged data, which is recompressed", "# later at the level above. Keep this low so logging stays cheap." });
+        HEADERS.put("blob-compression-level", new String[] { "# Zstandard compression level, from 1 (fastest) to 22 (smallest), used when logged", "# activity is packed into compressed storage. SQLite packs activity continuously, as", "# soon as enough of it has been logged, so there is no separate recent and old data." });
+        HEADERS.put("lookup-cache-mb", new String[] { "# Memory, in megabytes, kept for recently unpacked activity so repeated lookups,", "# inspector clicks and paging do not unpack the same data again. 0 disables it. SQLite only." });
+        HEADERS.put("log-blob-compression-level", new String[] { "# Zstandard compression level used for item and block data as it is logged, before", "# it is packed. Keep this low so logging stays cheap." });
         HEADERS.put("language", new String[] { "# The language file to use, read from the CoreProtect folder." });
         HEADERS.put("auto-purge", new String[] { "# Automatically purge data older than the configured time.", "# Examples: 30d, 12w, 6mo. The minimum value is 30d.", "# Automatic purging is always enabled; this setting controls how much history is kept.", "# Rows are deleted in place, in small batches, without ever duplicating the database." });
         HEADERS.put("auto-purge-time", new String[] { "# The time of day, in 24-hour HH:mm server time, that the automatic purge runs." });
@@ -300,11 +297,14 @@ public class Config extends Language {
         this.AUTO_PURGE = this.getString("auto-purge");
         this.AUTO_PURGE_TIME = this.getString("auto-purge-time");
         this.BLOB_COMPRESSION = this.getBoolean("blob-compression", true);
-        this.COLD_DEBUG = this.getBoolean("cold-debug", false);
+        // Older builds named some of these after a split between recent and old data that no
+        // longer exists; their keys are still honoured when the new ones are absent. Their limit on
+        // how many stored rows one lookup may read, cold-max-rows, is gone: a lookup reads whatever
+        // it needs.
+        this.STORAGE_DEBUG = this.getBoolean("storage-debug", this.getBoolean("cold-debug", false));
         this.BLOB_COMPRESSION_LEVEL = this.getInt("blob-compression-level", 19);
-        this.HOT_BLOB_COMPRESSION_LEVEL = this.getInt("hot-blob-compression-level", 3);
-        this.HOT_WINDOW_SECONDS = parseDuration(this.getString("hot-window"), 604800L);
-        this.COLD_MAX_ROWS = Math.max(10000, this.getInt("cold-max-rows", 1000000));
+        this.LOG_BLOB_COMPRESSION_LEVEL = this.getInt(this.hasOption("log-blob-compression-level") ? "log-blob-compression-level" : "hot-blob-compression-level", 3);
+        this.LOOKUP_CACHE_MB = Math.max(0, this.getInt("lookup-cache-mb", 128));
         // Cores used for the compressing a compact does. Nought means as many as are spare.
         this.COMPACT_THREADS = Math.max(0, this.getInt("compact-threads", 0));
         // Whether a file that is mostly free space is written out afresh when the server stops.
@@ -426,8 +426,18 @@ public class Config extends Language {
         }
 
         configured = NON_DIGIT_PATTERN.matcher(configured).replaceAll("");
+        if (configured.isEmpty()) {
+            return dfl;
+        }
 
-        return configured.isEmpty() ? dfl : Integer.parseInt(configured);
+        // Only digits are left, so the one way parsing can fail is a value too large for an int.
+        // Clamp it rather than refusing to start over a single oversized setting.
+        try {
+            return Integer.parseInt(configured);
+        }
+        catch (NumberFormatException e) {
+            return Integer.MAX_VALUE;
+        }
     }
 
     /**

@@ -79,15 +79,15 @@ public class BlockLookup {
 
             String blockName = block.getType().name().toLowerCase(Locale.ROOT);
             String where;
-            String index;
             if (entitySpawnRowId == null) {
                 String actionPredicate = "(action IN(0,1," + LookupActions.ENTITY_SPAWN + ") OR (action=" + LookupActions.ENTITY_KILL + " AND type IN(" + placedEntityTypeIds() + ")))";
                 where = LocationQuery.predicate("wid", " = " + worldId) + " AND " + LocationQuery.predicate("x", " = " + x) + " AND " + LocationQuery.predicate("z", " = " + z) + " AND y = " + y + " AND " + actionPredicate + " AND time >= " + checkTime;
-                index = WorldUtils.getWidIndex("block");
+            }
+            else if (ConfigHandler.databaseType.isSQLite()) {
+                where = null; // chosen below, once the entity's rows are known
             }
             else {
                 where = "rowid IN(" + entityBlockRowIds(statement, entitySpawnRowId) + ") AND action IN(" + LookupActions.ENTITY_SPAWN + "," + LookupActions.ENTITY_KILL + ") AND time >= " + checkTime;
-                index = "";
             }
             boolean combinedDuckDBPage = ConfigHandler.databaseType.isDuckDB();
             String query;
@@ -104,19 +104,24 @@ public class BlockLookup {
             else {
                 if (entitySpawnRowId == null) {
                     // Compressed storage as well as the live rows, so a block's whole history is shown
-                    // rather than only what happened to it inside the hot window.
+                    // wherever each row of it currently sits. Only the page's own rows are read, and the
+                    // page count is taken while the page is planned.
                     source = InspectorSource.open(statement.getConnection(), "block", worldId, x, x, z, z, checkTime);
                 }
-                String sourceTable = source == null ? ConfigHandler.prefix + "block " + index : source.table() + " " + source.index();
-                query = "SELECT COUNT(*) as count from " + sourceTable + "WHERE " + where + " LIMIT 1 OFFSET 0";
-                results = statement.executeQuery(query);
-                while (results.next()) {
-                    count = results.getInt("count");
+                else if (ConfigHandler.databaseType.isSQLite()) {
+                    // The entity's rows are packed minutes after they are logged, so they are found by
+                    // what they record rather than by row id in the live table, and only around the
+                    // places the entity is known to have been.
+                    EntityBlockRows rows = entityBlockRows(statement, entitySpawnRowId);
+                    where = rows.packedPredicate() + " AND action IN(" + LookupActions.ENTITY_SPAWN + "," + LookupActions.ENTITY_KILL + ") AND time >= " + checkTime;
+                    int[] area = rows.area(worldId, x, z);
+                    source = InspectorSource.open(statement.getConnection(), "block", worldId, area[0], area[1], area[2], area[3], checkTime);
                 }
-                results.close();
+                else {
+                    source = InspectorSource.openForEntity(statement.getConnection(), "block", entitySpawnRowId);
+                }
                 String columns = "time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back" + (entitySpawnRowId == null ? "" : ",wid,x,y,z");
-                query = "SELECT " + columns + " FROM " + sourceTable + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + page_start;
-                results = statement.executeQuery(query);
+                results = source.page(columns, where, ConfigHandler.getDescendingEventOrder(), page_start, limit);
             }
 
             StringBuilder resultTextBuilder = new StringBuilder();
@@ -207,6 +212,9 @@ public class BlockLookup {
 
             resultText = resultTextBuilder.toString();
             results.close();
+            if (source != null) {
+                count = (int) source.count(where);
+            }
             int totalPages = (int) Math.ceil(count / (limit + 0.0));
 
             if (found) {
@@ -242,6 +250,81 @@ public class BlockLookup {
             }
         }
         return resultText;
+    }
+
+    /** The block rows of one entity's spawn and kill, as the entity spawn row records them. */
+    private static final class EntityBlockRows {
+        private final long blockRowId;
+        private final long killRowId;
+        private final Integer originWorldId;
+        private final double originX;
+        private final double originZ;
+        private final Integer currentWorldId;
+        private final double currentX;
+        private final double currentZ;
+
+        private EntityBlockRows(long blockRowId, long killRowId, Integer originWorldId, double originX, double originZ, Integer currentWorldId, double currentX, double currentZ) {
+            this.blockRowId = blockRowId;
+            this.killRowId = killRowId;
+            this.originWorldId = originWorldId;
+            this.originX = originX;
+            this.originZ = originZ;
+            this.currentWorldId = currentWorldId;
+            this.currentX = currentX;
+            this.currentZ = currentZ;
+        }
+
+        /**
+         * @return a clause keeping the spawn and kill rows wherever they are stored, live or packed
+         */
+        private String packedPredicate() {
+            StringJoiner alternatives = new StringJoiner(" OR ", "(", ")");
+            alternatives.add("rowid = " + (blockRowId > 0L ? blockRowId : 0L));
+            if (killRowId > 0L) {
+                alternatives.add("(action = " + LookupActions.ENTITY_KILL + " AND data = " + killRowId + ")");
+            }
+            return alternatives.toString();
+        }
+
+        /**
+         * @return the x and z bounds, as {minX, maxX, minZ, maxZ}, covering the inspected block and
+         *         every place in its world the entity was spawned at or last seen at
+         */
+        private int[] area(int worldId, int x, int z) {
+            int[] area = { x, x, z, z };
+            include(area, worldId, originWorldId, originX, originZ);
+            include(area, worldId, currentWorldId, currentX, currentZ);
+            return area;
+        }
+
+        private static void include(int[] area, int worldId, Integer placeWorldId, double placeX, double placeZ) {
+            if (placeWorldId == null || placeWorldId != worldId) {
+                return;
+            }
+            int blockX = (int) Math.floor(placeX);
+            int blockZ = (int) Math.floor(placeZ);
+            area[0] = Math.min(area[0], blockX);
+            area[1] = Math.max(area[1], blockX);
+            area[2] = Math.min(area[2], blockZ);
+            area[3] = Math.max(area[3], blockZ);
+        }
+    }
+
+    private static EntityBlockRows entityBlockRows(Statement statement, int entitySpawnRowId) throws SQLException {
+        try (ResultSet results = statement.executeQuery("SELECT block_rowid,kill_rowid,wid,origin_x,origin_z,current_wid,x,z FROM " + ConfigHandler.prefix + "entity_spawn WHERE rowid=" + entitySpawnRowId)) {
+            if (!results.next()) {
+                return new EntityBlockRows(0L, 0L, null, 0, 0, null, 0, 0);
+            }
+            long blockRowId = results.getLong("block_rowid");
+            long killRowId = results.getLong("kill_rowid");
+            int originWorldId = results.getInt("wid");
+            Integer origin = results.wasNull() ? null : originWorldId;
+            double originX = results.getDouble("origin_x");
+            double originZ = results.getDouble("origin_z");
+            int currentWorldId = results.getInt("current_wid");
+            Integer current = results.wasNull() ? null : currentWorldId;
+            return new EntityBlockRows(blockRowId, killRowId, origin, originX, originZ, current, results.getDouble("x"), results.getDouble("z"));
+        }
     }
 
     private static String entityBlockRowIds(Statement statement, int entitySpawnRowId) throws SQLException {

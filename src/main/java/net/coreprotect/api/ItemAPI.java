@@ -1,7 +1,6 @@
 package net.coreprotect.api;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,35 +45,30 @@ public class ItemAPI {
                 return result;
             }
 
-            StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,type,data,amount,action,rolled_back FROM ");
-            query.append(filter.table(connection, "item", "")).append(' ');
-            if (filter.hasLocation() && !ConfigHandler.databaseType.isDuckDB()) {
-                query.append(WorldUtils.getWidIndex("item"));
-            }
-            filter.appendWhere(query);
-            filter.appendMaterialWhere(query);
-            if (options.getItemActions().isEmpty()) {
-                query.append(" AND action NOT IN (")
-                        .append(ItemLogger.ITEM_BREAK).append(",")
-                        .append(ItemLogger.ITEM_DESTROY).append(",")
-                        .append(ItemLogger.ITEM_CREATE).append(",")
-                        .append(ItemLogger.ITEM_SELL).append(",")
-                        .append(ItemLogger.ITEM_BUY).append(")");
-            }
-            else {
-                LookupFilter.appendActionWhere(query, "", options.getItemActions().stream().mapToInt(ItemAction::id).toArray());
-            }
-            query.append(" ORDER BY ").append(ConfigHandler.getDescendingEventOrder());
-            filter.appendLimit(query);
-
-            try (PreparedStatement statement = connection.prepareStatement(query.toString())) {
-                filter.bind(statement);
-
-                try (ResultSet results = statement.executeQuery()) {
-                    while (results.next()) {
-                        result.add(parseItemResult(connection, results));
-                    }
+            try {
+                StringBuilder whereBuilder = new StringBuilder(filter.where(""));
+                filter.appendMaterialWhere(whereBuilder);
+                if (options.getItemActions().isEmpty()) {
+                    whereBuilder.append(" AND action NOT IN (")
+                            .append(ItemLogger.ITEM_BREAK).append(",")
+                            .append(ItemLogger.ITEM_DESTROY).append(",")
+                            .append(ItemLogger.ITEM_CREATE).append(",")
+                            .append(ItemLogger.ITEM_SELL).append(",")
+                            .append(ItemLogger.ITEM_BUY).append(")");
                 }
+                else {
+                    LookupFilter.appendActionWhere(whereBuilder, "", options.getItemActions().stream().mapToInt(ItemAction::id).toArray());
+                }
+                String where = whereBuilder.toString();
+                StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",wid,x,y,z,type,data,amount,action,rolled_back FROM ");
+                query.append(filter.table(connection, "item", "", where, 0)).append(' ');
+                query.append(filter.index("item"));
+                query.append("WHERE ").append(where);
+
+                filter.read(connection, query.toString(), " ORDER BY " + ConfigHandler.getDescendingEventOrder(), filter::bind, results -> result.add(parseItemResult(connection, results)));
+            }
+            finally {
+                filter.close();
             }
         }
         catch (Exception e) {

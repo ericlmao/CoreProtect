@@ -19,6 +19,7 @@ import net.coreprotect.database.CompactProgress;
 import net.coreprotect.database.Database;
 import net.coreprotect.database.PurgeExecutor;
 import net.coreprotect.database.PurgePolicy;
+import net.coreprotect.database.SegmentCompactor;
 import net.coreprotect.language.Phrase;
 import net.coreprotect.language.Selector;
 import net.coreprotect.utility.Chat;
@@ -181,7 +182,8 @@ public final class AutoPurgeService {
     }
 
     /**
-     * Packs activity that has aged out of the hot window into compressed storage. Runs straight
+     * Packs whatever activity is ready into compressed storage, in case the continuous packing has
+     * fallen behind or was stopped. Runs straight
      * after the purge, while the background purge claim is still held, so it never competes with a
      * manual purge or a rollback.
      *
@@ -238,6 +240,8 @@ public final class AutoPurgeService {
             ColdRollupTask.repairRowIds(connection, AutoPurgeService::awaitNextBatch);
             ColdRollupTask.rollUp(connection, AutoPurgeService::awaitNextBatch);
             ColdRollupTask.backfillStatistics(connection, AutoPurgeService::awaitNextBatch);
+            ColdRollupTask.repackOldSegments(connection, AutoPurgeService::awaitNextBatch, 0);
+            SegmentCompactor.compactAll(connection, AutoPurgeService::awaitNextBatch);
             // Entity data is never packed into a segment, because it is read a row at a time. It is
             // compressed where it lies instead.
             BlobRecompressTask.run(connection, AutoPurgeService::awaitNextBatch);

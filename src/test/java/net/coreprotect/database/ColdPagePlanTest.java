@@ -46,7 +46,6 @@ class ColdPagePlanTest {
 
     private Connection connection;
     private DatabaseType previousType;
-    private long lastSkipped;
     private long lastDecoded;
 
     @BeforeEach
@@ -84,44 +83,26 @@ class ColdPagePlanTest {
     }
 
     @Test
-    void planningActuallySkipsSegmentsRatherThanReadingThemAll() throws Exception {
+    void aPlannedPageDecodesOnlyItsOwnRows() throws Exception {
         seal();
-        int perSegment = ROWS_PER_DAY / USERS;
-
-        // A page inside the newest segment cannot skip anything.
-        readPage(1, 1, 4, 0, 0, true);
-        assertEquals(0, skippedFor(1, 1), "the newest page reads from the newest segment");
-
-        // A page past the first segment skips it outright, and deeper pages skip more.
-        long afterOne = skippedFor(1, perSegment + 1);
-        long afterThree = skippedFor(1, (3 * perSegment) + 1);
-        assertTrue(afterOne >= perSegment, "a page past the first segment skips it: " + afterOne);
-        assertTrue(afterThree > afterOne, "a deeper page skips more: " + afterThree + " vs " + afterOne);
-
-        // Skipping is what keeps the read small: only the segments around the page are decoded.
-        long decoded = decodedRowsFor(1, (3 * perSegment) + 1);
-        assertTrue(decoded < ROWS_PER_DAY * DAYS / USERS, "only part of the result is read: " + decoded);
+        int owned = (ROWS_PER_DAY * DAYS) / USERS;
+        for (int offset : new int[] { 0, 1, owned / 2, owned - 4, owned - 1 }) {
+            readPage(1, offset, 4, 0, 0, true);
+            assertTrue(lastDecoded <= 4, "a page at " + offset + " decodes only its own rows, decoded " + lastDecoded);
+        }
+        readPage(1, 3 * (ROWS_PER_DAY / USERS), 4, 0, 0, false);
+        assertTrue(lastDecoded > 4, "without a plan the page decodes everything above it too: " + lastDecoded);
     }
 
     @Test
-    void planningAppliesToOneTableOnlyAndNeverLeaksToAnother() throws Exception {
+    void aWindowConfinesOnlyTheTableItWasSetFor() throws Exception {
         seal();
-        int perSegment = ROWS_PER_DAY / USERS;
-
         SQLiteColdIndex.beginLookup(0, 0);
         try {
             SQLiteColdIndex.setLookupFilters("1", "");
-            SQLiteColdIndex.setRowBudget((3L * perSegment) + 4);
-            SQLiteColdIndex.setPlannedOffset(3 * perSegment);
-
-            // The table the offset was set for may skip.
+            SQLiteColdIndex.setPageWindow("container", SQLiteColdIndex.KeyWindow.ofRowIds(1, 2));
             SQLiteColdIndex.sourceExpression(connection, "block", 1, null);
-            assertTrue(SQLiteColdIndex.skippedRows("block") > 0, "the planned table skips segments");
-
-            // A second table read in the same lookup must not: its rows would shift a merged
-            // result that the query's single offset knows nothing about.
-            SQLiteColdIndex.sourceExpression(connection, "block", 1, null);
-            assertEquals(0, SQLiteColdIndex.skippedRows("container"), "an unplanned table never skips");
+            assertEquals((ROWS_PER_DAY * DAYS) / USERS, count("SELECT COUNT(*) FROM temp.cp_cold_block"), "a table without a window of its own is read whole");
         }
         finally {
             SQLiteColdIndex.endLookup(connection);
@@ -153,50 +134,6 @@ class ColdPagePlanTest {
         finally {
             SQLiteColdIndex.endLookup(connection);
         }
-    }
-
-    @Test
-    void refusesAPageThatWouldReadMoreThanTheLimitAllows() throws Exception {
-        seal();
-        Config.getGlobal().COLD_MAX_ROWS = 50;
-        try {
-            SQLiteColdIndex.beginLookup(0, 0);
-            try {
-                SQLiteColdIndex.setLookupFilters("1", "");
-                SQLiteColdIndex.setRowBudget(5000);
-                String source = SQLiteColdIndex.sourceExpression(connection, "block", 1, null);
-                assertEquals(ConfigHandler.prefix + "block", source, "an out of reach page reads no compressed rows");
-                assertTrue(SQLiteColdIndex.isOutOfReach(), "the lookup is told the page is out of reach");
-            }
-            finally {
-                SQLiteColdIndex.endLookup(connection);
-            }
-
-            // A page within the limit still reads normally.
-            SQLiteColdIndex.beginLookup(0, 0);
-            try {
-                SQLiteColdIndex.setLookupFilters("1", "");
-                SQLiteColdIndex.setRowBudget(10);
-                assertTrue(SQLiteColdIndex.sourceExpression(connection, "block", 1, null).startsWith("("));
-                assertTrue(!SQLiteColdIndex.isOutOfReach());
-            }
-            finally {
-                SQLiteColdIndex.endLookup(connection);
-            }
-        }
-        finally {
-            Config.getGlobal().COLD_MAX_ROWS = 500000;
-        }
-    }
-
-    private long skippedFor(long user, int offset) throws Exception {
-        readPage(user, offset, 4, 0, 0, true);
-        return lastSkipped;
-    }
-
-    private long decodedRowsFor(long user, int offset) throws Exception {
-        readPage(user, offset, 4, 0, 0, true);
-        return lastDecoded;
     }
 
     @Test
@@ -234,6 +171,23 @@ class ColdPagePlanTest {
         }
     }
 
+    @Test
+    void plannedPagesMatchWhenLiveRowsComeFirst() throws Exception {
+        seal();
+        // Live rows are newer than every packed row, so they come first in the page. Skipping
+        // packed segments past them has to leave the live rows where they were.
+        long now = System.currentTimeMillis() / 1000L;
+        try (Statement statement = connection.createStatement()) {
+            for (int index = 0; index < 30; index++) {
+                statement.executeUpdate("INSERT INTO co_block (time,user,wid,x,y,z,type,data,meta,blockdata,action,rolled_back) VALUES (" + (now - 100 + index) + "," + (1 + (index % 3))
+                        + ",1,5,64,5,12,0,NULL,NULL,1,0)");
+            }
+        }
+        for (int offset : offsets()) {
+            assertSamePage(1, offset, 4, 0, 0);
+        }
+    }
+
     /**
      * Asks for the same page with and without planning and requires an identical answer.
      */
@@ -245,26 +199,28 @@ class ColdPagePlanTest {
 
     private List<Long> readPage(long user, int offset, int pageSize, long startTime, long endTime, boolean planned) throws Exception {
         List<Long> page = new ArrayList<>();
+        StringBuilder clause = new StringBuilder(" user = " + user);
+        if (startTime > 0) {
+            clause.append(" AND time > ").append(startTime);
+        }
+        if (endTime > 0) {
+            clause.append(" AND time <= ").append(endTime);
+        }
+        ColdPagePlan plan = null;
+        if (planned) {
+            plan = ColdPagePlan.plan(connection, List.of(new ColdPagePlan.Branch("block", 0, clause.toString(), 1, null)), false, "user", offset, pageSize);
+            assertTrue(plan != null, "a lookup of one player can be planned");
+        }
         SQLiteColdIndex.beginLookup(startTime, endTime);
         try {
-            SQLiteColdIndex.setLookupFilters(Long.toString(user), "");
-            SQLiteColdIndex.setPlannedOffset(planned ? offset : 0);
-            SQLiteColdIndex.setRowBudget((long) offset + pageSize);
-
+            SQLiteColdIndex.setPredicateFilters(clause.toString(), "user");
+            if (plan != null) {
+                SQLiteColdIndex.setPageWindow("block", plan.window("block"));
+            }
             String source = SQLiteColdIndex.sourceExpression(connection, "block", 1, null);
-            long skipped = SQLiteColdIndex.skippedRows("block");
-            lastSkipped = skipped;
-            lastDecoded = source.startsWith("(") ? count("SELECT COUNT(*) FROM temp.cp_cold_block") : 0;
-            StringBuilder query = new StringBuilder("SELECT rowid FROM " + source + " WHERE user = " + user);
-            if (startTime > 0) {
-                query.append(" AND time > ").append(startTime);
-            }
-            if (endTime > 0) {
-                query.append(" AND time <= ").append(endTime);
-            }
-            query.append(" ORDER BY rowid DESC LIMIT ").append(pageSize).append(" OFFSET ").append(offset - skipped);
-
-            try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery(query.toString())) {
+            lastDecoded = source.contains("temp.cp_cold_block") ? count("SELECT COUNT(*) FROM temp.cp_cold_block") : 0;
+            String query = "SELECT rowid FROM " + source + " WHERE" + clause + " ORDER BY rowid DESC LIMIT " + pageSize + " OFFSET " + (plan == null ? offset : 0);
+            try (Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery(query)) {
                 while (results.next()) {
                     page.add(results.getLong(1));
                 }

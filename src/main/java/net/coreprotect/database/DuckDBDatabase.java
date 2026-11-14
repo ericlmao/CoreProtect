@@ -99,6 +99,7 @@ final class DuckDBDatabase {
                 statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "version (" + rowId(prefix, "version") + ", time INTEGER, version VARCHAR)");
                 statement.executeUpdate("CREATE TABLE IF NOT EXISTS " + prefix + "world (" + rowId(prefix, "world") + ", id INTEGER, world VARCHAR)");
                 DuckDBSpatialIndex.createTable(prefix, statement);
+                SchemaUpgrade.ensureColumns(statement, prefix, DatabaseType.DUCKDB);
                 validateEntityDataColumns(connection, prefix);
 
                 if (!purge) {

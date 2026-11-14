@@ -883,6 +883,7 @@ public class Database extends Queue {
             statement.executeUpdate("PRAGMA busy_timeout=30000");
             statement.executeUpdate("PRAGMA temp_store=FILE");
         }
+        SQLiteSchema.useTemporaryDirectory(connection);
         return connection;
     }
 
@@ -1105,13 +1106,36 @@ public class Database extends Queue {
      * @throws SQLException
      *             if the state cannot be recorded
      */
+    /**
+     * Records the rolled back state of one row that has been packed into compressed storage.
+     *
+     * @param connection
+     *            the connection of the transaction making the change
+     * @param tableName
+     *            the unprefixed table the row belongs to
+     * @param rolledBack
+     *            the state to record
+     * @param rowId
+     *            the row
+     * @return true if the row is packed and its state was recorded, false if it is not packed
+     * @throws SQLException
+     *             if the state cannot be recorded
+     */
+    public static boolean recordPackedRollbackState(Connection connection, String tableName, int rolledBack, long rowId) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            return recordColdRollbackState(statement, tableName, rolledBack, java.util.Collections.singletonList(rowId)) == 1;
+        }
+    }
+
     private static int recordColdRollbackState(Statement statement, String tableName, int rolledBack, List<Long> rowIds) throws SQLException {
         Integer tableId = SQLiteColdIndex.tableId(tableName);
         if (!ConfigHandler.databaseType.isSQLite() || tableId == null) {
             return 0;
         }
 
-        long highWater = SQLiteColdIndex.coldHighWaterMark(tableName);
+        // Read from the database rather than from memory: a segment committed a moment ago may not
+        // be described in memory yet, and its rows would otherwise be recorded nowhere.
+        long highWater = SQLiteColdIndex.storedHighWaterMark(statement.getConnection(), tableName);
         if (highWater <= 0) {
             return 0;
         }
@@ -1256,6 +1280,7 @@ public class Database extends Queue {
             }
             try (Statement statement = connection.createStatement()) {
                 createMySQLTableStructures(prefix, statement);
+                SchemaUpgrade.ensureColumns(statement, prefix, DatabaseType.MYSQL);
                 createMySQLIndexes(prefix, statement, purge);
                 if (!purge && forceConnection == null) {
                     initializeTables(prefix, statement, DatabaseType.MYSQL);
@@ -1490,6 +1515,10 @@ public class Database extends Queue {
                 boolean createCommandMessagePrefixIndex = !tableData.contains(tablePrefix + "command");
                 boolean createSignMessagePrefixIndexes = !tableData.contains(tablePrefix + "sign");
                 createSQLiteTableStructures(prefix, statement, tableData);
+                if (!purge) {
+                    // A purge builds fresh tables in an attached file, which have every column.
+                    SchemaUpgrade.ensureColumns(statement, prefix, DatabaseType.SQLITE);
+                }
                 createSQLiteIndexes(tablePrefix, statement, indexData, attachDatabase, purge, createChatMessagePrefixIndex, createCommandMessagePrefixIndex, createSignMessagePrefixIndexes);
 
                 if (!purge && forceConnection == null) {

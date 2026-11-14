@@ -54,6 +54,7 @@ public class ShutdownService {
             try {
                 Consumer.blockDatabaseReloadForShutdown();
                 AutoPurgeService.stop();
+                StoragePackingService.stop();
                 if (ConfigHandler.worldeditEnabled) {
                     VersionUtils.unloadWorldEdit();
                 }
@@ -157,7 +158,7 @@ public class ShutdownService {
 
     static void waitForMaintenanceCompletion(long shutdownTime) throws InterruptedException {
         while (ConfigHandler.purgeRunning || Consumer.isBackgroundPurgeRunning() || PurgeCommand.isPurgeWorkerRunning()
-                || Consumer.isDatabaseReloadRunning()) {
+                || Consumer.isDatabaseReloadRunning() || StoragePackingService.isWorking()) {
             if ((System.currentTimeMillis() - shutdownTime) >= MAX_SHUTDOWN_WAIT_MS) {
                 return;
             }

@@ -73,6 +73,33 @@ public final class SegmentFilter {
         return Math.floorDiv(coordinate, 16);
     }
 
+    /**
+     * Places a chunk on a curve that keeps neighbouring chunks close together, by interleaving the
+     * bits of its coordinates. Sorting by this puts the rows of one area of the world next to each
+     * other, whichever direction the area extends in.
+     *
+     * @param chunkX
+     *            a chunk x coordinate
+     * @param chunkZ
+     *            a chunk z coordinate
+     * @return the chunk's position along the curve
+     */
+    public static long chunkCurve(int chunkX, int chunkZ) {
+        // Shifted so negative coordinates sort below positive ones; chunk coordinates never need
+        // more than 26 bits, and each of these has 32.
+        return spread(Integer.toUnsignedLong(chunkX ^ Integer.MIN_VALUE)) | (spread(Integer.toUnsignedLong(chunkZ ^ Integer.MIN_VALUE)) << 1);
+    }
+
+    private static long spread(long value) {
+        long spread = value & 0xFFFFFFFFL;
+        spread = (spread | (spread << 16)) & 0x0000FFFF0000FFFFL;
+        spread = (spread | (spread << 8)) & 0x00FF00FF00FF00FFL;
+        spread = (spread | (spread << 4)) & 0x0F0F0F0F0F0F0F0FL;
+        spread = (spread | (spread << 2)) & 0x3333333333333333L;
+        spread = (spread | (spread << 1)) & 0x5555555555555555L;
+        return spread;
+    }
+
     public void add(long value) {
         long first = mix64(value);
         long second = mix64(value ^ 0xD6E8FEB86659FD93L) | 1L;

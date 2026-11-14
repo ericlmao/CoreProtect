@@ -1,7 +1,6 @@
 package net.coreprotect.api;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -17,6 +16,7 @@ import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.database.Database;
 import net.coreprotect.database.DuckDBLookupQuery;
 import net.coreprotect.database.LocationQuery;
+import net.coreprotect.database.lookup.InspectorSource;
 import net.coreprotect.database.statement.UserStatement;
 import net.coreprotect.utility.BlockUtils;
 import net.coreprotect.utility.DatabaseUtils;
@@ -73,28 +73,48 @@ public class BlockAPI {
                 checkTime = time - offset;
             }
 
-            try (Statement statement = connection.createStatement()) {
-                String table = DuckDBLookupQuery.spatialTable(connection, "block", worldId, x, x, z, z, "spatial_rows");
-                String index = ConfigHandler.databaseType.isDuckDB() ? "" : WorldUtils.getWidIndex("block");
-                String query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,blockdata,rolled_back FROM " + table + " " + index + "WHERE " + LocationQuery.predicate("wid", " = " + worldId) + " AND " + LocationQuery.predicate("x", " = " + x) + " AND " + LocationQuery.predicate("z", " = " + z) + " AND y = " + y + " AND time > " + checkTime + " ORDER BY " + ConfigHandler.getDescendingEventOrder();
-
-                try (ResultSet results = statement.executeQuery(query)) {
-                    while (results.next()) {
-                        String resultTime = results.getString("time");
-                        int resultUserId = results.getInt("user");
-                        String resultAction = results.getString("action");
-                        int resultType = results.getInt("type");
-                        String resultData = results.getString("data");
-                        byte[] resultBlockData = DatabaseUtils.getBytes(results, "blockdata");
-                        String resultRolledBack = results.getString("rolled_back");
-
-                        String resultUser = UserStatement.getName(connection, resultUserId);
-                        String blockData = BlockUtils.byteDataToString(resultBlockData, resultType);
-
-                        String[] lookupData = new String[] { resultTime, resultUser, String.valueOf(x), String.valueOf(y), String.valueOf(z), String.valueOf(resultType), resultData, resultAction, resultRolledBack, String.valueOf(worldId), blockData };
-
-                        result.add(StringUtils.toStringArray(lookupData));
+            // On SQLite most of a block's history has been packed into compressed storage, and is
+            // read together with the live rows, the way the inspector reads it. A busy block can
+            // hold more packed rows than one lookup may copy out at once, so every row is read a
+            // bounded window of the history at a time.
+            InspectorSource source = ConfigHandler.databaseType.isSQLite() ? InspectorSource.open(connection, "block", worldId, x, x, z, z, checkTime > 0 ? checkTime + 1 : 0) : null;
+            try {
+                try (Statement statement = connection.createStatement()) {
+                    String columns = "time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,blockdata,rolled_back";
+                    String where = LocationQuery.predicate("wid", " = " + worldId) + " AND " + LocationQuery.predicate("x", " = " + x) + " AND " + LocationQuery.predicate("z", " = " + z) + " AND y = " + y + " AND time > " + checkTime;
+                    ResultSet rows;
+                    if (source != null) {
+                        rows = source.all(columns, where, ConfigHandler.getDescendingEventOrder());
                     }
+                    else {
+                        String table = DuckDBLookupQuery.spatialTable(connection, "block", worldId, x, x, z, z, "spatial_rows");
+                        String index = ConfigHandler.databaseType.isDuckDB() ? "" : WorldUtils.getWidIndex("block");
+                        rows = statement.executeQuery("SELECT " + columns + " FROM " + table + " " + index + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder());
+                    }
+
+                    try (ResultSet results = rows) {
+                        while (results.next()) {
+                            String resultTime = results.getString("time");
+                            int resultUserId = results.getInt("user");
+                            String resultAction = results.getString("action");
+                            int resultType = results.getInt("type");
+                            String resultData = results.getString("data");
+                            byte[] resultBlockData = DatabaseUtils.getBytes(results, "blockdata");
+                            String resultRolledBack = results.getString("rolled_back");
+
+                            String resultUser = UserStatement.getName(connection, resultUserId);
+                            String blockData = BlockUtils.byteDataToString(resultBlockData, resultType);
+
+                            String[] lookupData = new String[] { resultTime, resultUser, String.valueOf(x), String.valueOf(y), String.valueOf(z), String.valueOf(resultType), resultData, resultAction, resultRolledBack, String.valueOf(worldId), blockData };
+
+                            result.add(StringUtils.toStringArray(lookupData));
+                        }
+                    }
+                }
+            }
+            finally {
+                if (source != null) {
+                    source.close();
                 }
             }
         }
@@ -162,28 +182,24 @@ public class BlockAPI {
                 return result;
             }
 
-            StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,blockdata,rolled_back,wid,x,y,z FROM ");
-            query.append(filter.table(connection, "block", "")).append(' ');
-            if (filter.hasLocation() && !ConfigHandler.databaseType.isDuckDB()) {
-                query.append(WorldUtils.getWidIndex("block"));
+            try {
+                StringBuilder whereBuilder = new StringBuilder(filter.where(""));
+                filter.appendBlockMaterialWhere(whereBuilder);
+                int[] actions = blocksOnly && options.getBlockActions().isEmpty()
+                        ? new int[] { BlockAction.BREAK.id(), BlockAction.PLACE.id(), BlockAction.INTERACTION.id() }
+                        : options.getBlockActions().stream().mapToInt(BlockAction::id).toArray();
+                LookupFilter.appendActionWhere(whereBuilder, "", actions);
+                String where = whereBuilder.toString();
+                StringBuilder query = new StringBuilder("SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,blockdata,rolled_back,wid,x,y,z FROM ");
+                query.append(filter.table(connection, "block", "", where, 0)).append(' ');
+                query.append(filter.index("block"));
+                query.append("WHERE ").append(where);
+
+                filter.read(connection, query.toString(), " ORDER BY " + ConfigHandler.getDescendingEventOrder(), filter::bind,
+                        results -> result.add(parseBlockResult(connection, results, WorldUtils.getWorldName(results.getInt("wid")))));
             }
-            filter.appendWhere(query);
-            filter.appendBlockMaterialWhere(query);
-            int[] actions = blocksOnly && options.getBlockActions().isEmpty()
-                    ? new int[] { BlockAction.BREAK.id(), BlockAction.PLACE.id(), BlockAction.INTERACTION.id() }
-                    : options.getBlockActions().stream().mapToInt(BlockAction::id).toArray();
-            LookupFilter.appendActionWhere(query, "", actions);
-            query.append(" ORDER BY ").append(ConfigHandler.getDescendingEventOrder());
-            filter.appendLimit(query);
-
-            try (PreparedStatement statement = connection.prepareStatement(query.toString())) {
-                filter.bind(statement);
-
-                try (ResultSet results = statement.executeQuery()) {
-                    while (results.next()) {
-                        result.add(parseBlockResult(connection, results, WorldUtils.getWorldName(results.getInt("wid"))));
-                    }
-                }
+            finally {
+                filter.close();
             }
         }
         catch (Exception e) {
@@ -239,40 +255,38 @@ public class BlockAPI {
                 return result;
             }
 
-            boolean snapshot = filter.beginDuckDBSnapshot(connection);
             try {
-                StringBuilder containerWhere = new StringBuilder();
-                filter.appendWhere(containerWhere, "container_rows");
-                filter.appendMaterialWhere(containerWhere, "container_rows");
-                int[] actions = options.getContainerActions().stream().mapToInt(ContainerAction::id).toArray();
-                LookupFilter.appendActionWhere(containerWhere, "container_rows", actions);
-                StringBuilder entityWhere = new StringBuilder();
-                filter.appendEntityContainerWhere(entityWhere, "entity_rows", "spawn_rows");
-                filter.appendMaterialWhere(entityWhere, "entity_rows");
-                LookupFilter.appendActionWhere(entityWhere, "entity_rows", actions);
+                boolean snapshot = filter.beginDuckDBSnapshot(connection);
+                try {
+                    StringBuilder containerWhereBuilder = new StringBuilder(filter.where("container_rows"));
+                    filter.appendMaterialWhere(containerWhereBuilder, "container_rows");
+                    int[] actions = options.getContainerActions().stream().mapToInt(ContainerAction::id).toArray();
+                    LookupFilter.appendActionWhere(containerWhereBuilder, "container_rows", actions);
+                    StringBuilder entityWhereBuilder = new StringBuilder(filter.entityContainerWhere("entity_rows", "spawn_rows"));
+                    filter.appendMaterialWhere(entityWhereBuilder, "entity_rows");
+                    LookupFilter.appendActionWhere(entityWhereBuilder, "entity_rows", actions);
+                    String containerWhere = containerWhereBuilder.toString();
+                    String entityWhere = entityWhereBuilder.toString();
 
-                StringBuilder query = new StringBuilder("SELECT * FROM (");
-                query.append("SELECT 0 AS source,container_rows.rowid AS id,container_rows.time,container_rows.").append(ConfigHandler.databaseType.getUserColumn()).append(",container_rows.wid,container_rows.x,container_rows.y,container_rows.z,container_rows.action,container_rows.type,container_rows.data,container_rows.amount,container_rows.metadata,container_rows.rolled_back FROM ")
-                        .append(filter.table(connection, "container", "container_rows")).append(' ').append(containerWhere);
-                query.append(" UNION ALL ");
-                query.append("SELECT 1 AS source,entity_rows.rowid AS id,entity_rows.time,entity_rows.").append(ConfigHandler.databaseType.getUserColumn()).append(",spawn_rows.current_wid AS wid,spawn_rows.x,spawn_rows.y,spawn_rows.z,entity_rows.action,entity_rows.type,entity_rows.data,entity_rows.amount,entity_rows.metadata,entity_rows.rolled_back FROM ")
-                        .append(filter.entityContainerTable(connection, "entity_rows")).append(" JOIN ").append(ConfigHandler.prefix).append("entity_spawn spawn_rows ON spawn_rows.rowid=entity_rows.entity_spawn_rowid ").append(entityWhere);
-                query.append(") AS container_lookup ORDER BY time DESC,source DESC,id DESC");
-                filter.appendLimit(query);
+                    StringBuilder query = new StringBuilder("SELECT * FROM (");
+                    query.append("SELECT 0 AS source,container_rows.rowid AS id,container_rows.time,container_rows.").append(ConfigHandler.databaseType.getUserColumn()).append(",container_rows.wid,container_rows.x,container_rows.y,container_rows.z,container_rows.action,container_rows.type,container_rows.data,container_rows.amount,container_rows.metadata,container_rows.rolled_back FROM ")
+                            .append(filter.table(connection, "container", "container_rows", containerWhere, 0)).append(" WHERE ").append(containerWhere);
+                    query.append(" UNION ALL ");
+                    query.append("SELECT 1 AS source,entity_rows.rowid AS id,entity_rows.time,entity_rows.").append(ConfigHandler.databaseType.getUserColumn()).append(",spawn_rows.current_wid AS wid,spawn_rows.x,spawn_rows.y,spawn_rows.z,entity_rows.action,entity_rows.type,entity_rows.data,entity_rows.amount,entity_rows.metadata,entity_rows.rolled_back FROM ")
+                            .append(filter.entityContainerTable(connection, "entity_rows", entityWhere, 1)).append(" JOIN ").append(ConfigHandler.prefix).append("entity_spawn spawn_rows ON spawn_rows.rowid=entity_rows.entity_spawn_rowid WHERE ").append(entityWhere);
+                    query.append(") AS container_lookup");
 
-                try (PreparedStatement statement = connection.prepareStatement(query.toString())) {
-                    int parameterIndex = filter.bind(statement);
-                    filter.bindEntityContainer(statement, parameterIndex);
-
-                    try (ResultSet results = statement.executeQuery()) {
-                        while (results.next()) {
-                            result.add(parseContainerResult(connection, results));
-                        }
-                    }
+                    filter.read(connection, query.toString(), " ORDER BY time DESC,source DESC,id DESC", statement -> {
+                        int parameterIndex = filter.bind(statement);
+                        return filter.bindEntityContainer(statement, parameterIndex);
+                    }, results -> result.add(parseContainerResult(connection, results)));
+                }
+                finally {
+                    filter.endDuckDBSnapshot(connection, snapshot);
                 }
             }
             finally {
-                filter.endDuckDBSnapshot(connection, snapshot);
+                filter.close();
             }
         }
         catch (Exception e) {

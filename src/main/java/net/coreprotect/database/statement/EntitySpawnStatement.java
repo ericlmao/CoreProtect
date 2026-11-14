@@ -667,6 +667,12 @@ public final class EntitySpawnStatement {
             blockState.setLong(2, blockRowId);
             blockState.setInt(3, action);
             int updated = blockState.executeUpdate();
+            if (updated == 0 && !blockStateMatches(blockRowId, rolledBack, action)
+                    && Database.recordPackedRollbackState(blockState.getConnection(), "block", rolledBack, blockRowId)) {
+                // The row has been packed into compressed storage, where its state is recorded
+                // beside the segment rather than in it.
+                return;
+            }
             if (updated != 1 && (updated != 0 || !blockStateMatches(blockRowId, rolledBack, action))) {
                 throw new PermanentTransitionException("Expected one row for entity spawn block rollback state, updated " + updated);
             }

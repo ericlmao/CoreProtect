@@ -71,16 +71,9 @@ public class InteractionLookup {
                 results = statement.executeQuery(query);
             }
             else {
-                // Compressed storage as well as the live rows.
+                // Compressed storage as well as the live rows, reading only the page's own rows.
                 source = InspectorSource.open(statement.getConnection(), "block", worldId, x, x, z, z, checkTime);
-                query = "SELECT COUNT(*) as count from " + source.table() + " " + source.index() + "WHERE " + where + " LIMIT 1 OFFSET 0";
-                results = statement.executeQuery(query);
-                while (results.next()) {
-                    count = results.getInt("count");
-                }
-                results.close();
-                query = "SELECT time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back FROM " + source.table() + " " + source.index() + "WHERE " + where + " ORDER BY " + ConfigHandler.getDescendingEventOrder() + " LIMIT " + limit + " OFFSET " + pageStart;
-                results = statement.executeQuery(query);
+                results = source.page("time," + ConfigHandler.databaseType.getUserColumn() + ",action,type,data,rolled_back", where, ConfigHandler.getDescendingEventOrder(), pageStart, limit);
             }
 
             StringBuilder resultBuilder = new StringBuilder();
@@ -126,6 +119,9 @@ public class InteractionLookup {
             }
             result = resultBuilder.toString();
             results.close();
+            if (source != null) {
+                count = (int) source.count(where);
+            }
             int totalPages = (int) Math.ceil(count / (limit + 0.0));
 
             if (found) {

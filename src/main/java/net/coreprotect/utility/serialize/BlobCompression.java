@@ -67,7 +67,7 @@ public final class BlobCompression {
         }
 
         try {
-            byte[] compressed = compressAt(data, clampLevel(config.HOT_BLOB_COMPRESSION_LEVEL));
+            byte[] compressed = compressAt(data, clampLevel(config.LOG_BLOB_COMPRESSION_LEVEL));
             if (compressed.length >= data.length) {
                 return data;
             }

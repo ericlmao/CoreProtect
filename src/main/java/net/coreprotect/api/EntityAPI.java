@@ -1,7 +1,6 @@
 package net.coreprotect.api;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
@@ -53,39 +52,38 @@ public class EntityAPI {
                 return result;
             }
 
-            boolean snapshot = filter.beginDuckDBSnapshot(connection);
             try {
-                StringBuilder query = new StringBuilder("SELECT entity_rows.time,entity_rows." + ConfigHandler.databaseType.getUserColumn() + ",entity_rows.wid,entity_rows.x,entity_rows.y,entity_rows.z,entity_rows.type,entity_rows.action,entity_rows.rolled_back FROM ");
-                query.append(filter.entityTable(connection, "entity_rows"));
-                query.append(' ');
-                filter.appendEntityWhere(connection, query, "entity_rows");
-                int[] actions = options.getEntityActions().isEmpty()
-                        ? new int[] { LookupActions.ENTITY_KILL, LookupActions.ENTITY_SPAWN }
-                        : options.getEntityActions().stream().mapToInt(EntityAction::id).toArray();
-                LookupFilter.appendActionWhere(query, "entity_rows", actions);
-                if (!options.getIncludeEntities().isEmpty()) {
-                    query.append(" AND ").append(entityPredicate(options.getIncludeEntities()));
-                }
-                if (!options.getExcludeEntities().isEmpty()) {
-                    query.append(" AND NOT ").append(entityPredicate(options.getExcludeEntities()));
-                }
-                query.append(" ORDER BY ").append(ConfigHandler.getDescendingEventOrder().replace("time", "entity_rows.time").replace("rowid", "entity_rows.rowid"));
-                filter.appendLimit(query);
-
-                try (PreparedStatement statement = connection.prepareStatement(query.toString())) {
-                    filter.bindTrackedEntity(statement, 1);
-                    try (ResultSet results = statement.executeQuery()) {
-                        while (results.next()) {
-                            result.add(new EntityResult(
-                                    results.getLong("time"), UserStatement.getName(connection, results.getInt("user")), WorldUtils.getWorldName(results.getInt("wid")),
-                                    results.getInt("x"), results.getInt("y"), results.getInt("z"), results.getInt("type"), results.getInt("action"), results.getInt("rolled_back")
-                            ));
-                        }
+                boolean snapshot = filter.beginDuckDBSnapshot(connection);
+                try {
+                    StringBuilder whereBuilder = new StringBuilder(filter.entityWhere(connection, "entity_rows"));
+                    int[] actions = options.getEntityActions().isEmpty()
+                            ? new int[] { LookupActions.ENTITY_KILL, LookupActions.ENTITY_SPAWN }
+                            : options.getEntityActions().stream().mapToInt(EntityAction::id).toArray();
+                    LookupFilter.appendActionWhere(whereBuilder, "entity_rows", actions);
+                    if (!options.getIncludeEntities().isEmpty()) {
+                        whereBuilder.append(" AND ").append(entityPredicate(options.getIncludeEntities()));
                     }
+                    if (!options.getExcludeEntities().isEmpty()) {
+                        whereBuilder.append(" AND NOT ").append(entityPredicate(options.getExcludeEntities()));
+                    }
+                    String where = whereBuilder.toString();
+
+                    StringBuilder query = new StringBuilder("SELECT entity_rows.time,entity_rows." + ConfigHandler.databaseType.getUserColumn() + ",entity_rows.wid,entity_rows.x,entity_rows.y,entity_rows.z,entity_rows.type,entity_rows.action,entity_rows.rolled_back FROM ");
+                    query.append(filter.entityTable(connection, "entity_rows", where));
+                    query.append(" WHERE ").append(where);
+                    String order = " ORDER BY " + ConfigHandler.getDescendingEventOrder().replace("time", "entity_rows.time").replace("rowid", "entity_rows.rowid");
+
+                    filter.read(connection, query.toString(), order, statement -> filter.bindTrackedEntity(statement, 1), results -> result.add(new EntityResult(
+                            results.getLong("time"), UserStatement.getName(connection, results.getInt("user")), WorldUtils.getWorldName(results.getInt("wid")),
+                            results.getInt("x"), results.getInt("y"), results.getInt("z"), results.getInt("type"), results.getInt("action"), results.getInt("rolled_back")
+                    )));
+                }
+                finally {
+                    filter.endDuckDBSnapshot(connection, snapshot);
                 }
             }
             finally {
-                filter.endDuckDBSnapshot(connection, snapshot);
+                filter.close();
             }
         }
         catch (Exception e) {
