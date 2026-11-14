@@ -409,6 +409,7 @@ class PackedLocationPagingTest {
         Mockito.when(block.getZ()).thenReturn(Z);
         Mockito.when(block.getWorld()).thenReturn(world);
         Mockito.when(block.getType()).thenReturn(Material.HOPPER);
+        Mockito.when(block.getLocation()).thenReturn(location());
         return block;
     }
 

@@ -127,6 +127,7 @@ class PackedApiLookupTest {
         Mockito.when(block.getY()).thenReturn(Y);
         Mockito.when(block.getZ()).thenReturn(Z);
         Mockito.when(block.getWorld()).thenReturn(world);
+        Mockito.when(block.getLocation()).thenReturn(new Location(world, X, Y, Z));
 
         assertEquals(200, BlockAPI.performLookup(block, 0).size(), "every change to the block, packed or live");
         assertEquals(200, BlockAPI.performLookup(block, LookupOptions.builder().build()).size());
